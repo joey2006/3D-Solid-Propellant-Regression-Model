@@ -1,3 +1,1 @@
-This project contains literature on comparing two well known methods for simulating burnback regression of solid rocket motors.
-various research articles can be found in folder titles Sources
-My own paper comparing the two methods can be found in tfolder titles Paper
+This work in progress open source project focuses on simulating grain regression and internal balistics for solid rocket motors. The level set method is a 3D algorhtm used to approximate motor regression, and is capable of simulating complex geometries. Literature on specifications of this algorithm can be found in the sources folder, and my own paper on the comparison with the 2D fast marching method can be found inside the paper folder. My current goal for this project is to create something that my college aerospace team can use to improve the success of rocket launches. The overall goal is to create a software that anyone interested in solid rocket motors can use. 
