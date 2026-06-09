@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "srm-burnback"
+version = "0.1.0"
+description = "3D solid rocket motor grain burnback simulation using the Level Set Method"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "matplotlib>=3.7",
+    "scikit-image>=0.21",
+    "pyvista>=0.42",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["srm_burnback*"]

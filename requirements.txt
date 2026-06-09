@@ -1,0 +1,7 @@
+torch>=2.0
+matplotlib>=3.7
+scikit-image>=0.21
+pyvista>=0.42
+numpy>=1.24
+pytest>=7.0
+pytest-cov>=4.0
