@@ -11,6 +11,26 @@ evaluated on a coordinate grid:
   front cannot advance past this surface; the simulation uses it to mask the
   domain. Same sign convention: negative inside the casing, positive outside.
 
+Why two SDFs (evolving vs. static)
+----------------------------------
+The two fields play very different roles at run time, which is why they are kept
+separate rather than merged:
+
+* ``signed_distance`` produces the **evolving** field (phi). The burn front
+  moves, so phi is re-integrated across the *entire* grid every timestep by the
+  level-set machinery (Godunov upwind, TVD-RK3, reinitialization). This is where
+  essentially all the per-step cost lives.
+* ``outer_boundary_distance`` produces a **static** field. The casing never
+  moves, so it is evaluated *once* at initialization and thereafter only read --
+  consulted each step as a cheap mask ("has the front reached the wall here?")
+  to clamp the burn. It performs no work per step and adds no integration cost.
+
+So per timestep the simulator evolves a single field (phi) plus one constant
+guardrail. Merging them into one SDF would force phi to carry a kink where the
+moving front meets the fixed wall, corrupting the gradients exactly where the
+upwind scheme and reinitialization are most sensitive -- keeping them separate
+is both cheaper and numerically cleaner.
+
 Dimension-agnostic by design
 -----------------------------
 Coordinates are passed as a tuple of equally-shaped tensors -- ``(X, Y)`` for a
