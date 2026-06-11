@@ -74,6 +74,7 @@ class GrainGeometry(ABC):
         coords:
             Tuple of coordinate tensors, ``(X, Y)`` in 2D or ``(X, Y, Z)`` in
             3D, all of identical shape.
+        self: actual grain object with its own parameters 
 
         Returns
         -------
@@ -90,6 +91,67 @@ class GrainGeometry(ABC):
         the casing, positive outside it. The simulation uses this to stop the
         burn front from crossing the casing.
         """
+
+    def default_domain_size(self) -> float:
+        """Half-extent of the domain to use when the caller passes no ``domain_size``.
+
+        Grain-agnostic code can't know how big a given grain is, so each grain
+        supplies its own sensible default (a parametric grain from its casing
+        radius, an uploaded mesh from its bounding box). The base class has no
+        way to guess, so subclasses must override this if they want
+        :meth:`initialize_grid` to work without an explicit ``domain_size``.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not define a default domain size; "
+            "pass domain_size explicitly to initialize_grid()."
+        )
+
+    def initialize_grid(
+        self,
+        resolution: int,
+        domain_size: float | None = None,
+        length: float | None = None,
+        device: str = "cpu",
+    ) -> tuple[torch.Tensor, Coords, float]:
+        """Build the starting field for any grain.
+
+        This is intentionally grain-agnostic: it lays down a uniform grid and
+        evaluates *this* grain's :meth:`signed_distance` on it. Because
+        ``signed_distance`` is polymorphic, the same method produces the initial
+        phi for a BATES grain, a star grain, or an uploaded 3D geometry -- the
+        grain type is never referenced here.
+
+        Parameters
+        ----------
+        resolution:
+            Number of grid points along each axis.
+        domain_size:
+            Half-extent of the domain in x and y (axes span
+            ``[-domain_size, +domain_size]``). When ``None`` the grain's
+            :meth:`default_domain_size` is used.
+        length:
+            Axial length for a 3D grid. ``None`` builds a 2D grid.
+        device:
+            Torch device for the field (``"cpu"`` or ``"cuda"``).
+
+        Returns
+        -------
+        phi:
+            The initial signed-distance field (positive in the void, negative in
+            the propellant). This is what the level-set method advects.
+        coords:
+            The coordinate grid phi was evaluated on.
+        height:
+            Grid spacing (voxel size), shared across axes for square cells.
+        """
+        from .CoordinateBuilder import build_coords
+
+        if domain_size is None:
+            domain_size = self.default_domain_size()
+
+        coords, height = build_coords(resolution, domain_size, length, device)
+        phi = self.signed_distance(coords)
+        return phi, coords, height
 
     @property
     def ndim(self) -> int | None:

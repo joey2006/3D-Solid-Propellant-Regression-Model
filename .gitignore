@@ -15,3 +15,9 @@ venv/
 
 # Local Claude Code instructions — never commit
 CLAUDE.md
+
+# Local Claude Code agent state (plans, memory, settings)
+.claude/
+
+# Generated example/preview images
+examples/*.png

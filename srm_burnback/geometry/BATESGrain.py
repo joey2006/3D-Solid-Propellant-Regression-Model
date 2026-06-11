@@ -6,12 +6,9 @@ simulation, because its burn-back has a known analytical answer.
 """
 
 from __future__ import annotations
-
 import math
-
 import torch
-
-from .base import Coords, GrainGeometry
+from .GrainGeometry import Coords, GrainGeometry
 
 
 class BATESGrain(GrainGeometry):
@@ -53,6 +50,7 @@ class BATESGrain(GrainGeometry):
             phi = torch.maximum(phi, end_faces)
 
         return phi
+    
 
     def outer_boundary_distance(self, coords: Coords) -> torch.Tensor:
         # The casing wall is the cylinder at outer_radius. Same sign convention:
@@ -61,18 +59,10 @@ class BATESGrain(GrainGeometry):
         r = torch.sqrt(X**2 + Y**2)
         return r - self.outer_radius
 
-    # ------------------------------------------------------------------
-    # Analytical validation oracle
-    #
-    # The methods below give the EXACT answer for a BATES grain only under an
-    # idealisation: a single, uniform, imposed burn rate with erosive burning
-    # (and any other spatial rate variation) switched off. Under that condition
-    # the bore stays a perfect expanding circle, so r(t), perimeter and port
-    # area all have closed forms. They are a numerical test oracle for the
-    # level-set solver -- NOT a physical claim. Real motors have erosive burning
-    # (faster aft than fore), so the full simulation is expected to deviate from
-    # these formulas exactly where those effects matter.
-    # ------------------------------------------------------------------
+    def default_domain_size(self) -> float:
+        # Extend 5% past the casing so the outer wall isn't on the grid edge.
+        return self.outer_radius * 1.05
+
 
     def analytical_radius(self, t: float, burn_rate: float) -> float:
         """Bore radius at time ``t`` under a uniform, non-erosive burn rate.
