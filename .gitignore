@@ -21,3 +21,6 @@ CLAUDE.md
 
 # Generated example/preview images
 examples/*.png
+
+# Generated demo outputs
+examples/output/
