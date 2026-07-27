@@ -7,3 +7,14 @@ pytest>=7.0
 pytest-cov>=4.0
 jupyterlab>=4.0
 nbstripout>=0.6
+
+# Geometry import (issue #138) - reading uploaded meshes
+trimesh>=4.0
+
+# Developer viewer app (issue #172) - app/main.py
+streamlit>=1.30
+stpyvista>=0.1
+
+# Only needed to regenerate the test meshes in
+# examples/make_test_meshes.py (boolean backend for the finocyl slots).
+manifold3d>=2.3
