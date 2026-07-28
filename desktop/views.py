@@ -431,7 +431,7 @@ class MeshView(QWidget):
         # material rather than as more outer surface -- the same convention a
         # CAD section view uses. Always flat: it is planar by construction.
         if cap is not None and not wireframe:
-            self.plotter.add_mesh(
+            cap_actor = self.plotter.add_mesh(
                 cap,
                 color=theme.CUT_FACE,
                 smooth_shading=False,
@@ -440,6 +440,20 @@ class MeshView(QWidget):
                 reset_camera=False,
                 texture=self._active_texture(),
             )
+            # The cut face lies exactly on the plane the body was clipped with,
+            # so the two are coplanar and the depth buffer cannot separate them.
+            # The result is z-fighting: the cap flickers away for a frame and
+            # the grain appears see-through. Polygon offset biases the cap
+            # fractionally toward the camera in depth only -- it does not move
+            # the geometry, so the cut stays exactly where the user put it.
+            try:
+                mapper = cap_actor.GetMapper()
+                mapper.SetResolveCoincidentTopologyToPolygonOffset()
+                mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(
+                    -2.0, -2.0
+                )
+            except Exception:
+                pass  # depth tuning is cosmetic; never let it break the view
 
         self.plotter.add_axes()
 
