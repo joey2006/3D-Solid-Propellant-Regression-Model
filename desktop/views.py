@@ -144,6 +144,10 @@ class MeshView(QWidget):
         # and end faces crisp.
         pv.global_theme.sharp_edges_feature_angle = 30.0
 
+        # Built once and reused: regenerating noise per render would make
+        # the surface crawl as the section slider moves.
+        self._texture = self._grain_texture()
+
         self.plotter = QtInteractor(self)
         self.plotter.set_background(theme.VIEW_BG)
         layout.addWidget(self.plotter.interactor, 1)
@@ -201,10 +205,10 @@ class MeshView(QWidget):
         their end rings, that gradient covers the entire end cap. Face colours
         do not interpolate, so each region reads as one flat tone.
 
-        A small deterministic brightness jitter per face gives the surface the
-        slightly rough, granular look of a real composite propellant rather
-        than moulded plastic. It is seeded so it never shimmers between
-        renders, and it is small enough not to read as noise.
+        Surface roughness is *not* done here. Tinting each face individually
+        produces stripes rather than grain, because a cylinder wall's triangles
+        span its full height -- so one face is one tall thin sliver. Roughness
+        comes from a texture instead; see :meth:`_apply_texture_coords`.
         """
         try:
             import numpy as np
@@ -228,26 +232,97 @@ class MeshView(QWidget):
             def rgb(hex_colour):
                 h = hex_colour.lstrip("#")
                 return np.array(
-                    [int(h[i : i + 2], 16) for i in (0, 2, 4)], dtype=np.float64
+                    [int(h[i : i + 2], 16) for i in (0, 2, 4)], dtype=np.uint8
                 )
 
             # Three flat tones, selected by a hard threshold -- no blending.
-            colours = np.empty((len(alignment), 3), dtype=np.float64)
-            colours[:] = rgb(theme.CUT_FACE)                 # end faces
-            colours[alignment > 0.35] = rgb(theme.SURFACE)   # outer wall
+            colours = np.empty((len(alignment), 3), dtype=np.uint8)
+            colours[:] = rgb(theme.CUT_FACE)                  # end faces
+            colours[alignment > 0.35] = rgb(theme.SURFACE)    # outer wall
             colours[alignment < -0.35] = rgb(theme.INTERIOR)  # bore
 
-            # Fixed seed: the grain pattern must be identical every render, or
-            # it crawls as the section slider moves.
-            jitter = np.random.default_rng(12345).normal(
-                1.0, 0.035, size=(len(alignment), 1)
-            )
-            colours = np.clip(colours * jitter, 0, 255).astype(np.uint8)
-
             mesh.cell_data["grain_rgb"] = colours
+            mesh = MeshView._apply_texture_coords(mesh)
             return mesh
         except Exception:
             return mesh  # colouring is cosmetic; never block the view
+
+    # Grain size of the surface texture, in metres of real surface per tile.
+    # 4 mm across a 256 px tile is ~15 um per speck: fine sand, not gravel.
+    TEXTURE_TILE = 0.004
+
+    @staticmethod
+    def _apply_texture_coords(mesh):
+        """Give the mesh world-space UVs so a noise texture reads as fine sand.
+
+        Texture coordinates are derived from position rather than from any
+        parameterisation of the mesh, so the grain size is set in *metres of
+        real surface* and stays constant regardless of how coarsely the object
+        was tessellated. That is the whole point: per-face tinting scales with
+        the triangles and streaks, a texture does not.
+
+        Two projections, chosen per vertex from the normal:
+
+        * end faces (normal along the axis) project onto the XY plane;
+        * everything else -- outer wall, bore, slot walls -- wraps
+          cylindrically, using arc length so the texture is not stretched near
+          the axis.
+
+        ``split_vertices`` runs first so vertices are duplicated along sharp
+        creases. Without it a triangle could straddle the wall/cap boundary
+        with its corners on different projections, which smears the texture
+        across that face.
+        """
+        try:
+            import numpy as np
+
+            mesh = mesh.compute_normals(
+                point_normals=True, cell_normals=False, split_vertices=True,
+                feature_angle=30, consistent_normals=True,
+                auto_orient_normals=False, inplace=False,
+            )
+            points = np.asarray(mesh.points)
+            normals = np.asarray(mesh.point_data["Normals"])
+            origin = np.asarray(mesh.center)
+
+            x = points[:, 0] - origin[0]
+            y = points[:, 1] - origin[1]
+            radius = np.hypot(x, y)
+            axial = np.abs(normals[:, 2]) > 0.7
+
+            uv = np.empty((len(points), 2))
+            uv[:, 0] = np.where(
+                axial, x, np.arctan2(y, x) * np.maximum(radius, 1e-9)
+            )
+            uv[:, 1] = np.where(axial, y, points[:, 2])
+
+            mesh.active_texture_coordinates = (
+                uv / MeshView.TEXTURE_TILE
+            ).astype(np.float32)
+            return mesh
+        except Exception:
+            return mesh
+
+    @staticmethod
+    def _grain_texture():
+        """A fine, isotropic noise texture, modulated over the base colour.
+
+        Deliberately low contrast: this should read as the tooth of a cast
+        composite propellant, not as visible speckle. MODULATE blending
+        multiplies it into whatever colour the face already has, so the three
+        surface regions keep their distinct tones.
+        """
+        import numpy as np
+        import vtk
+
+        rng = np.random.default_rng(12345)
+        noise = rng.normal(238, 11, (256, 256, 1)).clip(0, 255).astype("uint8")
+        texture = pv.Texture(np.repeat(noise, 3, axis=2))
+        texture.repeat = True
+        texture.SetBlendingMode(
+            vtk.vtkTexture.VTK_TEXTURE_BLENDING_MODE_MODULATE
+        )
+        return texture
 
     def _render(self, reset_camera: bool = False) -> None:
         """Draw the cached mesh at the current style and section position."""
@@ -277,6 +352,10 @@ class MeshView(QWidget):
                 # roughness jitter survives exactly as computed.
                 scalars="grain_rgb" if has_region else None,
                 rgb=has_region or None,
+                # Fine noise multiplied over the flat region tones. World-space
+                # UVs mean the grain stays the same physical size whatever the
+                # tessellation, which is what per-face tinting could not do.
+                texture=self._texture if not wireframe else None,
                 show_scalar_bar=False,
                 color=None if has_region else theme.SURFACE,
                 line_width=1,
@@ -306,6 +385,7 @@ class MeshView(QWidget):
                 specular=0.0,
                 show_edges=False,
                 reset_camera=False,
+                texture=self._texture,
             )
 
         self.plotter.add_axes()
