@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme
-from .widgets import FieldRow
+from .widgets import FieldRow, hint
 
 # Powers-of-two-ish resolutions. The winding number is O(cells x triangles), so
 # cost scales with the cube of this -- a free-form spin box invites a user to
@@ -62,6 +62,13 @@ class GeometryPanel(QWidget):
             "later addition (#135)."
         )
         source_layout.addWidget(FieldRow("Grain type", self.grain_type))
+        source_layout.addWidget(
+            hint(
+                "Where the shape comes from. Only imported meshes are wired "
+                "up today: you supply an STL/OBJ and it becomes the grain. "
+                "The parametric options are a later addition (#135)."
+            )
+        )
 
         self.file_label = QLabel("No file loaded")
         self.file_label.setStyleSheet(
@@ -108,6 +115,14 @@ class GeometryPanel(QWidget):
                 "with the cube of this number.",
             )
         )
+        grid_layout.addWidget(
+            hint(
+                "How finely the grain is chopped up before simulating. The "
+                "grid is a 3D box of points: 64³ is 262k points, 128³ is 2.1M. "
+                "Higher resolves thin webs and slot corners, but cost grows "
+                "with the cube — doubling it is 8× the work."
+            )
+        )
 
         self.margin = QDoubleSpinBox()
         self.margin.setRange(0.0, 0.5)
@@ -123,6 +138,14 @@ class GeometryPanel(QWidget):
                 "domain edge, where the Neumann ghost cells live.",
             )
         )
+        grid_layout.addWidget(
+            hint(
+                "Empty space left around the grain, as a fraction of its size "
+                "(0.05 = 5% padding). The burn front must never touch the edge "
+                "of the box, where the maths stops being valid. Larger is "
+                "safer but wastes resolution on empty space."
+            )
+        )
 
         layout.addWidget(grid_box)
 
@@ -136,6 +159,13 @@ class GeometryPanel(QWidget):
         self.device.addItems(["CUDA (GPU)", "CPU"] if cuda else ["CPU"])
         self.device.currentIndexChanged.connect(self.changed)
         device_layout.addWidget(FieldRow("Device", self.device))
+        device_layout.addWidget(
+            hint(
+                "Where the heavy maths runs. Converting a mesh into a "
+                "simulation field is embarrassingly parallel and roughly "
+                "90x faster on the GPU than the CPU."
+            )
+        )
 
         detail = QLabel(
             torch.cuda.get_device_name(0)
@@ -222,6 +252,13 @@ class PropellantPanel(QWidget):
         vieille_layout.addWidget(
             FieldRow("Exponent n", self.n, "Pressure exponent. n ≥ 1 is unstable.")
         )
+        vieille_layout.addWidget(
+            hint(
+                "How fast the propellant burns, as rate = a x pressure^n. "
+                "'a' sets the base speed and 'n' how strongly pressure "
+                "accelerates it. n at or above 1 makes the motor unstable."
+            )
+        )
 
         self.density = QDoubleSpinBox()
         self.density.setRange(100.0, 3000.0)
@@ -290,6 +327,10 @@ class SimulationPanel(QWidget):
         self.max_time.setValue(10.0)
         self.max_time.setSuffix("  s")
         box_layout.addWidget(FieldRow("Max time", self.max_time))
+        box_layout.addWidget(
+            hint("How long to simulate before stopping, if the grain has not "
+                 "burnt out first.")
+        )
 
         self.cfl = QDoubleSpinBox()
         self.cfl.setRange(0.05, 0.9)
@@ -314,6 +355,13 @@ class SimulationPanel(QWidget):
                 self.reinit_every,
                 "Steps between reinitialisations, which repair |∇φ| "
                 "drift caused by curvature and non-uniform burn rate.",
+            )
+        )
+        box_layout.addWidget(
+            hint(
+                "CFL is the timestep safety factor — smaller is slower but "
+                "more stable, and above 1 the solver blows up. Reinit "
+                "periodically cleans up numerical drift in the surface field."
             )
         )
 

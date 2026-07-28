@@ -160,6 +160,21 @@ class FieldRow(QWidget):
         self.widget = widget
 
 
+def hint(text: str) -> QLabel:
+    """A small explanatory caption under a control.
+
+    Tooltips are invisible until hovered, which is no help to someone meeting
+    a control for the first time and wondering what it even is. These sit on
+    the panel permanently.
+    """
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet(
+        f"color:{theme.TEXT_FAINT}; font-size:11px; padding:0 0 4px 0;"
+    )
+    return label
+
+
 def divider() -> QFrame:
     """A thin horizontal rule."""
     line = QFrame()

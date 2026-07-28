@@ -106,8 +106,9 @@ class MeshView(QWidget):
         section_layout.setContentsMargins(10, 6, 10, 8)
         section_layout.setSpacing(8)
 
-        self.section_button = QPushButton("Section")
+        self.section_button = QPushButton("Section: off")
         self.section_button.setCheckable(True)
+        self.section_button.setMinimumWidth(96)
         self.section_button.setToolTip(
             "Cut the grain with a plane and look inside. Drag the slider to "
             "move the cut along the chosen axis."
@@ -430,10 +431,14 @@ class MeshView(QWidget):
             widget.setEnabled(enabled)
         if not enabled:
             self.section_button.setChecked(False)
+            self.section_button.setText("Section: off")
             self.section_readout.setText("--")
 
     def _update_section_readout(self) -> None:
         if getattr(self, "_pv_mesh", None) is None:
+            return
+        if not self.section_button.isChecked():
+            self.section_readout.setText("no cut")
             return
         letter = "ZXY"[self.section_axis.currentIndex()]
         self.section_readout.setText(f"{letter} {self._section_position():.4g}")
@@ -441,6 +446,10 @@ class MeshView(QWidget):
     def _on_section_toggled(self, checked: bool) -> None:
         for widget in (self.section_axis, self.section_slider, self.section_flip):
             widget.setEnabled(checked)
+        # The button label states the mode outright. Relying on the pressed
+        # look alone left it ambiguous whether sectioning was active.
+        self.section_button.setText("Section: ON" if checked else "Section: off")
+        self._update_section_readout()
         self._render()
 
     def _on_section_changed(self) -> None:
@@ -463,9 +472,35 @@ class MeshView(QWidget):
             self._render()
 
     def reset_camera(self) -> None:
-        if self.plotter is not None:
-            self.plotter.view_isometric()
-            self.plotter.reset_camera()
+        """Return the view to exactly how a mesh looks when first opened.
+
+        "Reset view" previously only re-framed the camera, which left a section
+        cut and a wireframe toggle in place -- so it appeared to do nothing
+        beyond standing the model upright. It now clears every view setting.
+        """
+        if self.plotter is None:
+            return
+
+        # Block signals so clearing the controls does not trigger a render per
+        # widget; one render happens at the end.
+        for widget in (self.section_button, self.section_axis, self.section_slider):
+            widget.blockSignals(True)
+        self.section_button.setChecked(False)
+        self.section_axis.setCurrentIndex(0)
+        self.section_slider.setValue(0)
+        for widget in (self.section_button, self.section_axis, self.section_slider):
+            widget.blockSignals(False)
+
+        self._section_invert = True
+        for widget in (self.section_axis, self.section_slider, self.section_flip):
+            widget.setEnabled(False)
+
+        self._style = "surface"
+        self.surface_button.setChecked(True)
+        self.wireframe_button.setChecked(False)
+
+        self._update_section_readout()
+        self._render(reset_camera=True)
 
     def clear(self) -> None:
         if self.plotter is not None:

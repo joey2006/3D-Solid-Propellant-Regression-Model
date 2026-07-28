@@ -190,6 +190,18 @@ QPushButton:disabled {{
     border-color: {BORDER};
     background: {BG_BASE};
 }}
+/* Toggle buttons must read as on or off at a glance. Without an explicit
+   :checked rule a checkable QPushButton looks identical in both states. */
+QPushButton:checked {{
+    background: {ACCENT_SOFT};
+    border: 1px solid {ACCENT};
+    color: {ACCENT_HOVER};
+    font-weight: 600;
+}}
+QPushButton:checked:hover {{
+    background: {ACCENT_PRESSED};
+    color: #ffffff;
+}}
 QPushButton[accent="true"] {{
     background: {ACCENT};
     border: 1px solid {ACCENT};
