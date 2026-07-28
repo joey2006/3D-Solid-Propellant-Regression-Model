@@ -52,7 +52,13 @@ MESH_SUFFIXES = {".stl", ".obj", ".ply", ".off", ".glb", ".gltf", ".3mf"}
 # Native CAD (#161). These are B-rep formats, not meshes: the file describes
 # exact surfaces, and a tessellation is generated on load. Handled by trimesh
 # via the `cascadio` backend (OpenCASCADE), which is an optional dependency.
-CAD_SUFFIXES = {".step", ".stp"}
+CAD_SUFFIXES = {".step", ".stp", ".ste"}
+
+# trimesh registers loaders for `.step` and `.stp` only, but Inventor's export
+# dialog offers `.ste` as well and will happily write it. Such a file is staged
+# through a temporary copy with a recognised extension rather than rejected for
+# its name.
+CAD_ALIAS_SUFFIXES = {".ste": ".step"}
 
 SUPPORTED_SUFFIXES = MESH_SUFFIXES | CAD_SUFFIXES
 
@@ -111,6 +117,9 @@ def load_mesh(path: str | Path):
     path = Path(path)
     suffix = path.suffix.lower()
 
+    if not path.is_file():
+        raise MeshImportError(f"no such file: '{path}'")
+
     if suffix in NATIVE_CAD_FORMATS:
         raise MeshImportError(
             f"'{path.name}' is a {NATIVE_CAD_FORMATS[suffix]} file. That is a "
@@ -138,10 +147,37 @@ def load_mesh(path: str | Path):
                 "backend. Install it with `pip install cascadio`."
             ) from exc
 
+    read_from = path
+    staged: Path | None = None
+    if suffix in CAD_ALIAS_SUFFIXES:
+        import shutil
+        import tempfile
+
+        handle = tempfile.NamedTemporaryFile(
+            suffix=CAD_ALIAS_SUFFIXES[suffix], delete=False
+        )
+        handle.close()
+        staged = Path(handle.name)
+        shutil.copyfile(path, staged)
+        read_from = staged
+
     try:
-        loaded = trimesh.load_mesh(str(path))
+        loaded = trimesh.load_mesh(str(read_from))
     except Exception as exc:
+        if suffix in CAD_SUFFIXES:
+            # A failed STEP conversion surfaces as a missing intermediate file
+            # from deep inside the converter, which says nothing useful about
+            # the actual problem: the file is not valid STEP.
+            raise MeshImportError(
+                f"could not read '{path.name}' as a STEP file. Check that it "
+                "was exported as STEP (AP203 or AP214) and is not empty or "
+                "truncated.\n\n"
+                f"Converter reported: {exc}"
+            ) from exc
         raise MeshImportError(f"could not parse '{path.name}': {exc}") from exc
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
 
     # A file holding several bodies loads as a Scene; flatten it.
     if isinstance(loaded, trimesh.Scene):
@@ -153,6 +189,54 @@ def load_mesh(path: str | Path):
         raise MeshImportError(f"'{path.name}' contains no triangles")
 
     return loaded
+
+
+#: Axis names, indexed the way tensors are.
+AXIS_NAMES = ("X", "Y", "Z")
+
+
+def axis_of_elongation(mesh) -> int:
+    """Index of the axis the mesh is longest along: 0 = X, 1 = Y, 2 = Z."""
+    return int(max(range(3), key=lambda i: float(mesh.extents[i])))
+
+
+def orient_grain_axis_to_z(mesh) -> tuple[object, int]:
+    """Rotate ``mesh`` so its long axis lies along Z. Returns ``(mesh, from)``.
+
+    Why this is not cosmetic
+    ------------------------
+    Z is the grain axis everywhere downstream. ``grid_for_mesh`` builds its
+    domain around it, and erosive burning is fundamentally axial -- combustion
+    gas accelerates down the bore toward the nozzle, so the mass flux ``G(z)``
+    that drives the Lenoir-Robillard rate is accumulated *along Z*. A grain
+    imported lying along Y would have its erosive physics computed across the
+    diameter, which is meaningless.
+
+    CAD packages disagree about which axis points up: Inventor and SolidWorks
+    commonly export Y-up, while most mesh tooling is Z-up. STEP records the
+    orientation faithfully, so a Y-up model arrives genuinely rotated rather
+    than mislabelled.
+
+    The long axis is used as the heuristic because a motor grain is longer than
+    it is wide. ``from`` is returned -- equal to 2 when nothing was done -- so
+    the caller can tell the user that geometry was moved.
+    """
+    import numpy as np
+    import trimesh
+
+    axis = axis_of_elongation(mesh)
+    if axis == 2:
+        return mesh, 2
+
+    oriented = mesh.copy()
+    if axis == 1:
+        # +90 deg about X sends Y to Z.
+        matrix = trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0])
+    else:
+        # -90 deg about Y sends X to Z.
+        matrix = trimesh.transformations.rotation_matrix(-np.pi / 2, [0, 1, 0])
+    oriented.apply_transform(matrix)
+    return oriented, axis
 
 
 def mesh_stats(mesh) -> dict:

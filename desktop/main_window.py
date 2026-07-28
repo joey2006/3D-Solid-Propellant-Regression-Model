@@ -284,6 +284,13 @@ class MainWindow(QMainWindow):
         )
 
         messages = []
+        if stats.get("reoriented_from"):
+            messages.append(
+                f"This model's long axis was {stats['reoriented_from']}; it has "
+                "been rotated so the grain axis lies along Z. Everything "
+                "downstream assumes that, erosive burning especially, since "
+                "axial mass flux accumulates along the bore."
+            )
         if not stats["watertight"]:
             messages.append(
                 "This mesh is not watertight — it has holes or boundary edges. "

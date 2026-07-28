@@ -15,7 +15,13 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from srm_burnback.geometry.import_mesh import MeshImportError, load_mesh, mesh_stats
+from srm_burnback.geometry.import_mesh import (
+    AXIS_NAMES,
+    MeshImportError,
+    load_mesh,
+    mesh_stats,
+    orient_grain_axis_to_z,
+)
 
 
 class MeshLoadWorker(QObject):
@@ -37,10 +43,18 @@ class MeshLoadWorker(QObject):
             self.progress.emit(f"Reading {self._path.name}...")
             mesh = load_mesh(self._path)
 
+            # CAD packages disagree on the up axis -- Inventor and SolidWorks
+            # commonly export Y-up. Everything downstream treats Z as the grain
+            # axis, erosive burning most of all, so square it away at import.
+            mesh, came_from = orient_grain_axis_to_z(mesh)
+
             # Watertightness and degeneracy checks walk the whole face list, so
             # this is not free on a large mesh -- keep it off the UI thread too.
             self.progress.emit("Analysing geometry...")
             stats = mesh_stats(mesh)
+            stats["reoriented_from"] = (
+                None if came_from == 2 else AXIS_NAMES[came_from]
+            )
 
             self.finished.emit(mesh, stats, self._path)
         except MeshImportError as exc:
