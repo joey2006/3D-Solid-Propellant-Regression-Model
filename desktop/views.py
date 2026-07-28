@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QScrollArea,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -87,6 +89,53 @@ class MeshView(QWidget):
         layout.addWidget(bar)
         layout.addWidget(divider())
 
+        # --- Section (cutaway) strip --------------------------------------
+        section_bar = QWidget()
+        section_bar.setStyleSheet(f"background:{theme.BG_BASE};")
+        section_layout = QHBoxLayout(section_bar)
+        section_layout.setContentsMargins(10, 6, 10, 8)
+        section_layout.setSpacing(8)
+
+        self.section_button = QPushButton("Section")
+        self.section_button.setCheckable(True)
+        self.section_button.setToolTip(
+            "Cut the grain with a plane and look inside. Drag the slider to "
+            "move the cut along the chosen axis."
+        )
+        self.section_button.toggled.connect(self._on_section_toggled)
+        section_layout.addWidget(self.section_button)
+
+        self.section_axis = QComboBox()
+        self.section_axis.addItems(["Z (length)", "X", "Y"])
+        self.section_axis.setFixedWidth(104)
+        self.section_axis.currentIndexChanged.connect(self._on_section_changed)
+        section_layout.addWidget(self.section_axis)
+
+        self.section_slider = QSlider(Qt.Horizontal)
+        self.section_slider.setRange(0, 1000)
+        self.section_slider.setValue(500)
+        self.section_slider.valueChanged.connect(self._on_section_changed)
+        section_layout.addWidget(self.section_slider, 1)
+
+        self.section_readout = QLabel("--")
+        self.section_readout.setFixedWidth(78)
+        self.section_readout.setStyleSheet(
+            f"color:{theme.TEXT_MUTED}; font-family:{theme.FONT_MONO};"
+            "font-size:12px;"
+        )
+        section_layout.addWidget(self.section_readout)
+
+        self.section_flip = QPushButton("Flip")
+        self.section_flip.setToolTip("Keep the other half instead.")
+        self.section_flip.clicked.connect(self._on_flip)
+        section_layout.addWidget(self.section_flip)
+
+        layout.addWidget(section_bar)
+        layout.addWidget(divider())
+
+        self._section_invert = True
+        self._set_section_enabled(False)
+
         # Facets meeting at less than this angle are treated as one smooth
         # surface; anything sharper stays a crease. 30 degrees keeps a
         # 128-sided bore (2.8 deg per facet) round while leaving slot corners
@@ -119,36 +168,163 @@ class MeshView(QWidget):
             return
         self._empty.hide()
         self._mesh = mesh
-        self.plotter.clear()
+        # Wrapping copies the geometry, so cache it: the section slider
+        # re-renders on every tick and must not re-convert each time.
+        self._pv_mesh = pv.wrap(mesh)
 
+        self._set_section_enabled(True)
+        self._update_section_readout()
+        self._render(reset_camera=True)
+
+    def _render(self, reset_camera: bool = False) -> None:
+        """Draw the cached mesh at the current style and section position."""
+        if self.plotter is None or getattr(self, "_pv_mesh", None) is None:
+            return
+
+        mesh, cap = self._sectioned_mesh()
         wireframe = self._style == "wireframe"
-        self._actor = self.plotter.add_mesh(
-            pv.wrap(mesh),
-            style="wireframe" if wireframe else "surface",
-            color=theme.ACCENT,
-            line_width=1,
-            # Surface mode reads as a solid object: normals are averaged across
-            # neighbouring facets so a 128-sided bore looks round rather than
-            # polygonal. `split_sharp_edges` keeps that from rounding off
-            # genuine creases -- slot corners and end faces stay crisp, because
-            # smoothing is only applied where the angle between facets is below
-            # the theme's sharp-edge feature angle (set in __init__).
-            # Tessellation is still inspectable via Wireframe.
-            smooth_shading=not wireframe,
-            split_sharp_edges=not wireframe,
-            specular=0.3,
-            specular_power=15,
-        )
+
+        self.plotter.clear()
+        if mesh is not None and mesh.n_points:
+            self._actor = self.plotter.add_mesh(
+                mesh,
+                style="wireframe" if wireframe else "surface",
+                color=theme.ACCENT,
+                line_width=1,
+                # Surface mode reads as a solid object: normals are averaged
+                # across neighbouring facets so a 128-sided bore looks round
+                # rather than polygonal. `split_sharp_edges` keeps that from
+                # rounding off genuine creases -- slot corners and end faces
+                # stay crisp, because smoothing is only applied where the angle
+                # between facets is below the theme's sharp-edge feature angle
+                # (set in __init__). Tessellation stays inspectable via
+                # Wireframe.
+                smooth_shading=not wireframe,
+                split_sharp_edges=not wireframe,
+                specular=0.3,
+                specular_power=15,
+            )
+
+        # The cut face gets a paler, matte treatment so it reads as exposed
+        # material rather than as more outer surface -- the same convention a
+        # CAD section view uses. Always flat: it is planar by construction.
+        if cap is not None and not wireframe:
+            self.plotter.add_mesh(
+                cap,
+                color=theme.CUT_FACE,
+                smooth_shading=False,
+                specular=0.0,
+                show_edges=False,
+            )
+
         self.plotter.add_axes()
-        self.plotter.view_isometric()
-        self.plotter.reset_camera()
+        if reset_camera:
+            self.plotter.view_isometric()
+            self.plotter.reset_camera()
+        self.plotter.render()
+
+    # --- Sectioning -------------------------------------------------------
+
+    def _section_axis_index(self) -> int:
+        """0/1/2 for X/Y/Z. Z is listed first because it is the grain axis."""
+        return {0: 2, 1: 0, 2: 1}[self.section_axis.currentIndex()]
+
+    def _section_position(self) -> float:
+        """Slider fraction mapped onto the mesh bounds along the chosen axis."""
+        axis = self._section_axis_index()
+        bounds = self._pv_mesh.bounds
+        lo, hi = bounds[2 * axis], bounds[2 * axis + 1]
+        return lo + (hi - lo) * (self.section_slider.value() / 1000.0)
+
+    def _sectioned_mesh(self):
+        """``(body, cap)`` for the current cut; ``cap`` may be ``None``.
+
+        The cut face is built by slicing and triangulating the contour rather
+        than with ``clip_closed_surface``, which refuses any non-manifold input
+        -- and boolean-derived grains like the finocyl are routinely
+        non-manifold. The contour route works on those too, and correctly
+        leaves the bore open instead of capping the grain into a solid rod.
+        """
+        if not self.section_button.isChecked():
+            return self._pv_mesh, None
+
+        axis = self._section_axis_index()
+        normal = [0.0, 0.0, 0.0]
+        normal[axis] = 1.0
+        origin = list(self._pv_mesh.center)
+        origin[axis] = self._section_position()
+
+        body = self._pv_mesh.clip(
+            normal=normal, origin=origin, invert=self._section_invert
+        )
+        return body, self._cut_face(normal, origin)
+
+    def _cut_face(self, normal, origin):
+        """Triangulated cross-section at the cut plane, or ``None``.
+
+        Returns ``None`` when the contour cannot be closed: a mesh with holes
+        produces broken contours that triangulate to slivers or nothing, and an
+        uncapped cut is the honest result there rather than a fabricated face.
+        """
+        try:
+            contour = self._pv_mesh.slice(normal=normal, origin=origin)
+            if contour.n_cells == 0:
+                return None
+            cap = contour.triangulate_contours()
+            if cap.n_cells == 0:
+                return None
+            # Reject slivers by comparing against the contour's own footprint.
+            b = contour.bounds
+            spans = sorted(
+                [b[1] - b[0], b[3] - b[2], b[5] - b[4]], reverse=True
+            )[:2]
+            if cap.area < 0.01 * spans[0] * spans[1]:
+                return None
+            return cap
+        except Exception:
+            return None
+
+    def _set_section_enabled(self, enabled: bool) -> None:
+        for widget in (
+            self.section_button,
+            self.section_axis,
+            self.section_slider,
+            self.section_flip,
+        ):
+            widget.setEnabled(enabled)
+        if not enabled:
+            self.section_button.setChecked(False)
+            self.section_readout.setText("--")
+
+    def _update_section_readout(self) -> None:
+        if getattr(self, "_pv_mesh", None) is None:
+            return
+        letter = "ZXY"[self.section_axis.currentIndex()]
+        self.section_readout.setText(f"{letter} {self._section_position():.4g}")
+
+    def _on_section_toggled(self, checked: bool) -> None:
+        for widget in (self.section_axis, self.section_slider, self.section_flip):
+            widget.setEnabled(checked)
+        self._render()
+
+    def _on_section_changed(self) -> None:
+        self._update_section_readout()
+        if self.section_button.isChecked():
+            self._render()
+
+    def _on_flip(self) -> None:
+        self._section_invert = not self._section_invert
+        if self.section_button.isChecked():
+            self._render()
+
+    # --- View state -------------------------------------------------------
 
     def set_style(self, style: str) -> None:
         self._style = style
         self.surface_button.setChecked(style == "surface")
         self.wireframe_button.setChecked(style == "wireframe")
-        if getattr(self, "_mesh", None) is not None:
-            self.show_mesh(self._mesh)
+        if getattr(self, "_pv_mesh", None) is not None:
+            self._render()
 
     def reset_camera(self) -> None:
         if self.plotter is not None:
@@ -159,6 +335,8 @@ class MeshView(QWidget):
         if self.plotter is not None:
             self.plotter.clear()
             self._mesh = None
+            self._pv_mesh = None
+            self._set_section_enabled(False)
             self._empty.show()
 
     def close_plotter(self) -> None:

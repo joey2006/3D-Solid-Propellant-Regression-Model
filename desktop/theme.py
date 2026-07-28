@@ -39,6 +39,10 @@ ERROR = "#cf5f5f"
 # silhouette reads clearly against it.
 VIEW_BG = "#202426"
 
+# Exposed material on a section cut: paler and matte, so a cut face is
+# instantly distinguishable from outer surface -- the CAD section convention.
+CUT_FACE = "#e8b48c"
+
 FONT = "Segoe UI, Inter, system-ui, sans-serif"
 FONT_MONO = "Cascadia Mono, Consolas, monospace"
 

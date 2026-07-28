@@ -336,8 +336,14 @@ class MainWindow(QMainWindow):
         return list(self._settings.value("recent_files", []) or [])
 
     def _remember_recent(self, path: Path) -> None:
-        recent = [p for p in self._recent_files() if p != str(path)]
-        recent.insert(0, str(path))
+        # Resolve before comparing: the same file reached via a relative path
+        # and via the file dialog's absolute one are different strings, and
+        # would otherwise both sit in the list.
+        resolved = str(Path(path).resolve())
+        recent = [
+            p for p in self._recent_files() if str(Path(p).resolve()) != resolved
+        ]
+        recent.insert(0, resolved)
         self._settings.setValue("recent_files", recent[:MAX_RECENT])
         self._rebuild_recent_menu()
 
