@@ -125,7 +125,11 @@ class MeshView(QWidget):
         section_layout.addWidget(self.section_slider, 1)
 
         self.section_readout = QLabel("--")
-        self.section_readout.setFixedWidth(78)
+        self.section_readout.setFixedWidth(124)
+        self.section_readout.setToolTip(
+            "How deep the cut reaches, measured from the end it is "
+            "cutting in from."
+        )
         self.section_readout.setStyleSheet(
             f"color:{theme.TEXT_MUTED}; font-family:{theme.FONT_MONO};"
             "font-size:12px;"
@@ -479,8 +483,18 @@ class MeshView(QWidget):
         if not self.section_button.isChecked():
             self.section_readout.setText("no cut")
             return
-        letter = "ZXY"[self.section_axis.currentIndex()]
-        self.section_readout.setText(f"{letter} {self._section_position():.4g}")
+
+        # Depth of the cut, not the plane's coordinate. A raw coordinate is in
+        # the mesh's own frame -- "z = 0.0507" tells the user nothing, because
+        # where zero sits depends on how the part happened to be modelled.
+        # How far in the cut has travelled is the thing actually being chosen.
+        axis = self._section_axis_index()
+        bounds = self._pv_mesh.bounds
+        span = bounds[2 * axis + 1] - bounds[2 * axis]
+        amount = self.section_slider.value() / 1000.0
+        self.section_readout.setText(
+            f"{amount * span * 1000:.1f} mm  ({amount:.0%})"
+        )
 
     def _on_section_toggled(self, checked: bool) -> None:
         for widget in (self.section_axis, self.section_slider, self.section_flip):

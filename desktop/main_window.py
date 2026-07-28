@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
+    QScrollArea,
     QTabWidget,
 )
 
@@ -114,7 +115,22 @@ class MainWindow(QMainWindow):
 
     def _add_dock(self, title: str, widget, area) -> None:
         dock = QDockWidget(title, self)
-        dock.setWidget(widget)
+
+        # Panels go inside a scroll area rather than straight into the dock.
+        # A dock gives its contents whatever height is left over once the other
+        # docks in the same column have taken theirs, and a widget taller than
+        # that is simply clipped -- the bottom controls vanish with no
+        # indication they exist. Scrolling keeps everything reachable at any
+        # window size.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(widget)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Wide enough that the labelled rows never need horizontal scrolling.
+        scroll.setMinimumWidth(300)
+
+        dock.setWidget(scroll)
         dock.setObjectName(f"dock_{title.lower()}")
         dock.setFeatures(
             QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
