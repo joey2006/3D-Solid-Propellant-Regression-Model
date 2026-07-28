@@ -26,6 +26,9 @@ from PySide6.QtWidgets import (
 )
 
 from srm_burnback.geometry.import_mesh import (
+    CAD_SUFFIXES,
+    MESH_SUFFIXES,
+    NATIVE_CAD_FORMATS,
     SUPPORTED_SUFFIXES,
     estimate_winding_cost,
     grid_for_mesh,
@@ -158,12 +161,27 @@ class MainWindow(QMainWindow):
     # -- Mesh loading ------------------------------------------------------
 
     def open_mesh(self) -> None:
-        patterns = " ".join(f"*{s}" for s in sorted(SUPPORTED_SUFFIXES))
+        supported = " ".join(f"*{s}" for s in sorted(SUPPORTED_SUFFIXES))
+        native = " ".join(f"*{s}" for s in sorted(NATIVE_CAD_FORMATS))
+        meshes = " ".join(f"*{s}" for s in sorted(MESH_SUFFIXES))
+        cad = " ".join(f"*{s}" for s in sorted(CAD_SUFFIXES))
+
+        # Native CAD files are listed in the default filter even though they
+        # cannot be opened. Filtering them out hides the file a user is
+        # plainly looking at, with no hint as to why -- far more confusing
+        # than selecting it and being told to export a neutral format.
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Open grain geometry",
             str(self._last_directory()),
-            f"Mesh files ({patterns});;All files (*)",
+            ";;".join(
+                [
+                    f"Grain geometry ({supported} {native})",
+                    f"Mesh files ({meshes})",
+                    f"CAD files ({cad})",
+                    "All files (*)",
+                ]
+            ),
         )
         if path:
             self.load_path(Path(path))
