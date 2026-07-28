@@ -11,7 +11,12 @@ nbstripout>=0.6
 # Geometry import (issue #138) - reading uploaded meshes
 trimesh>=4.0
 
-# Developer viewer app (issue #172) - app/main.py
+# Desktop application (issue #157) - the product UI, `python -m desktop`
+PySide6>=6.6
+pyvistaqt>=0.11
+
+# Developer viewer app (issue #172) - app/main.py. A test harness for the
+# geometry pipeline, not the product; retire once the desktop app covers it.
 streamlit>=1.30
 stpyvista>=0.1
 
