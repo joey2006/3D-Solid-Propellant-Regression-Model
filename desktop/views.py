@@ -69,6 +69,10 @@ class MeshView(QWidget):
             button.clicked.connect(lambda _=False, s=style: self.set_style(s))
             bar_layout.addWidget(button)
         self.surface_button.setChecked(True)
+        self.surface_button.setToolTip(
+            "Smooth-shaded solid. Sharp creases are preserved; only genuinely "
+            "curved regions are smoothed."
+        )
         self.wireframe_button.setToolTip(
             "Wireframe shows tessellation density -- compare it against the "
             "grid spacing to judge whether the mesh is resolved."
@@ -82,6 +86,12 @@ class MeshView(QWidget):
 
         layout.addWidget(bar)
         layout.addWidget(divider())
+
+        # Facets meeting at less than this angle are treated as one smooth
+        # surface; anything sharper stays a crease. 30 degrees keeps a
+        # 128-sided bore (2.8 deg per facet) round while leaving slot corners
+        # and end faces crisp.
+        pv.global_theme.sharp_edges_feature_angle = 30.0
 
         self.plotter = QtInteractor(self)
         self.plotter.set_background(theme.VIEW_BG)
@@ -110,14 +120,24 @@ class MeshView(QWidget):
         self._empty.hide()
         self._mesh = mesh
         self.plotter.clear()
+
+        wireframe = self._style == "wireframe"
         self._actor = self.plotter.add_mesh(
             pv.wrap(mesh),
-            style="wireframe" if self._style == "wireframe" else "surface",
+            style="wireframe" if wireframe else "surface",
             color=theme.ACCENT,
-            show_edges=(self._style == "surface"),
-            edge_color="#7a4527",
             line_width=1,
-            smooth_shading=False,  # faceting is information, not a defect
+            # Surface mode reads as a solid object: normals are averaged across
+            # neighbouring facets so a 128-sided bore looks round rather than
+            # polygonal. `split_sharp_edges` keeps that from rounding off
+            # genuine creases -- slot corners and end faces stay crisp, because
+            # smoothing is only applied where the angle between facets is below
+            # the theme's sharp-edge feature angle (set in __init__).
+            # Tessellation is still inspectable via Wireframe.
+            smooth_shading=not wireframe,
+            split_sharp_edges=not wireframe,
+            specular=0.3,
+            specular_power=15,
         )
         self.plotter.add_axes()
         self.plotter.view_isometric()
