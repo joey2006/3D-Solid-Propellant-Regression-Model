@@ -32,16 +32,6 @@ except Exception:  # pragma: no cover - depends on local VTK/Qt install
     HAVE_3D = False
 
 
-def _region_cmap():
-    """Colour map for the surface-region scalar: -1 bore, 0 ends, +1 outer."""
-    from matplotlib.colors import LinearSegmentedColormap
-
-    return LinearSegmentedColormap.from_list(
-        "grain_region",
-        [theme.INTERIOR, theme.CUT_FACE, theme.SURFACE],
-    )
-
-
 class MeshView(QWidget):
     """Interactive 3D view of the imported mesh.
 
@@ -190,43 +180,71 @@ class MeshView(QWidget):
 
     @staticmethod
     def _classify_surface(mesh):
-        """Tag every point with which *kind* of surface it belongs to.
+        """Assign every face a flat colour plus a faint roughness grain.
 
         Colour has to distinguish the bore from the outer wall, and neither
         back-face darkening nor ambient occlusion can do it. Back-face
         darkening fails because a bore's normals point inward toward the axis,
-        so through a cutaway you see its *front* faces. Occlusion is a
-        screen-space effect and washes out at exactly the shallow viewing
-        angles where the bore is hardest to find.
+        so through a cutaway you see its *front* faces. Occlusion is
+        screen-space and washes out at exactly the shallow viewing angles where
+        the bore is hardest to find.
 
         Geometry answers it directly: on a grain, the outer wall's normal
         points radially outward from the motor axis and the bore's points
-        radially inward. So the dot product of the surface normal with the
-        outward radial direction is +1 on the outer wall, -1 in the bore, and
-        ~0 on the end faces. That scalar drives the colour map, which makes the
-        bore unmistakable from any angle rather than only when lined up.
+        radially inward. The dot product of the face normal with the outward
+        radial direction is therefore +1 on the outer wall, -1 in the bore and
+        ~0 on the end faces.
+
+        This is done **per face, not per vertex**. Vertex scalars get
+        interpolated across each triangle, which smears the three regions into
+        a gradient -- and on an annulus, whose side walls carry vertices only at
+        their end rings, that gradient covers the entire end cap. Face colours
+        do not interpolate, so each region reads as one flat tone.
+
+        A small deterministic brightness jitter per face gives the surface the
+        slightly rough, granular look of a real composite propellant rather
+        than moulded plastic. It is seeded so it never shimmers between
+        renders, and it is small enough not to read as noise.
         """
         try:
             import numpy as np
 
             mesh = mesh.compute_normals(
-                point_normals=True, cell_normals=False, consistent_normals=True,
+                point_normals=False, cell_normals=True, consistent_normals=True,
                 auto_orient_normals=False, inplace=False,
             )
-            normals = np.asarray(mesh.point_data["Normals"])
-            points = np.asarray(mesh.points)
+            normals = np.asarray(mesh.cell_data["Normals"])
+            centres = np.asarray(mesh.cell_centers().points)
 
-            centre = np.asarray(mesh.center)
+            origin = np.asarray(mesh.center)
             # Radial direction about the z axis, which is the grain axis.
-            radial = points[:, :2] - centre[:2]
+            radial = centres[:, :2] - origin[:2]
             length = np.linalg.norm(radial, axis=1, keepdims=True)
             radial = np.divide(
                 radial, length, out=np.zeros_like(radial), where=length > 1e-12
             )
+            alignment = np.einsum("ij,ij->i", normals[:, :2], radial)
 
-            mesh.point_data["region"] = np.einsum(
-                "ij,ij->i", normals[:, :2], radial
-            ).astype(np.float32)
+            def rgb(hex_colour):
+                h = hex_colour.lstrip("#")
+                return np.array(
+                    [int(h[i : i + 2], 16) for i in (0, 2, 4)], dtype=np.float64
+                )
+
+            # Three flat tones, selected by a hard threshold -- no blending.
+            colours = np.empty((len(alignment), 3), dtype=np.float64)
+            colours[:] = rgb(theme.CUT_FACE)                 # end faces
+            colours[alignment > 0.35] = rgb(theme.SURFACE)   # outer wall
+            colours[alignment < -0.35] = rgb(theme.INTERIOR)  # bore
+
+            # Fixed seed: the grain pattern must be identical every render, or
+            # it crawls as the section slider moves.
+            jitter = np.random.default_rng(12345).normal(
+                1.0, 0.035, size=(len(alignment), 1)
+            )
+            colours = np.clip(colours * jitter, 0, 255).astype(np.uint8)
+
+            mesh.cell_data["grain_rgb"] = colours
             return mesh
         except Exception:
             return mesh  # colouring is cosmetic; never block the view
@@ -249,22 +267,16 @@ class MeshView(QWidget):
         self.plotter.clear()
         if mesh is not None and mesh.n_points:
             has_region = (
-                not wireframe and "region" in getattr(mesh, "point_data", {})
+                not wireframe and "grain_rgb" in getattr(mesh, "cell_data", {})
             )
             self._actor = self.plotter.add_mesh(
                 mesh,
                 style="wireframe" if wireframe else "surface",
-                # Colour by which surface it is when the classification is
-                # available, falling back to a flat colour otherwise.
-                scalars="region" if has_region else None,
-                cmap=_region_cmap() if has_region else None,
-                # Not (-1, 1): point normals are averaged over adjoining faces,
-                # and on a cylinder whose side wall has vertices only at its
-                # end rings every wall vertex is shared with an end cap, so the
-                # dot product saturates near +/-0.7 rather than +/-1. Mapping
-                # to that range is what makes the bore reach full dark instead
-                # of stopping at a mid grey.
-                clim=(-0.7, 0.7) if has_region else None,
+                # Direct per-face RGB rather than a colour map: no scalar range
+                # to interpolate, so the three regions stay flat and the
+                # roughness jitter survives exactly as computed.
+                scalars="grain_rgb" if has_region else None,
+                rgb=has_region or None,
                 show_scalar_bar=False,
                 color=None if has_region else theme.SURFACE,
                 line_width=1,
@@ -279,17 +291,8 @@ class MeshView(QWidget):
                 # Wireframe.
                 smooth_shading=not wireframe,
                 split_sharp_edges=not wireframe,
-                specular=0.3,
-                specular_power=15,
-                # Back-facing geometry is drawn darker. This catches surfaces
-                # turned away from the camera; the bore itself is handled by
-                # SSAO in _apply_depth_effects, since its normals face inward
-                # and it is therefore front-facing through a cutaway.
-                backface_params=(
-                    None
-                    if wireframe
-                    else {"color": theme.INTERIOR, "specular": 0.05}
-                ),
+                specular=0.08,
+                specular_power=8,
             )
 
         # The cut face gets a paler, matte treatment so it reads as exposed
@@ -317,14 +320,12 @@ class MeshView(QWidget):
         self.plotter.render()
 
     def _apply_depth_effects(self) -> None:
-        """Screen-space ambient occlusion, so cavities read as cavities.
+        """Anti-aliasing only.
 
-        Back-face darkening alone cannot reveal the bore: a bore's surface
-        normals point inward toward the axis, so looking into a cutaway you see
-        its *front* faces, not its back faces. SSAO works on geometry instead of
-        orientation -- it darkens anything enclosed by nearby surfaces, which is
-        exactly what a bore, a slot, and a fin root are. It also supplies the
-        subtle surface texture that flat shading lacks.
+        Ambient occlusion used to live here to reveal the bore, but it shades
+        cavities with a soft gradient. Per-face region colouring now separates
+        bore from outer wall outright, so the occlusion pass only muddied flat
+        tones that are meant to stay flat.
         """
         try:
             # The occlusion radius is a world-space distance, so it has to
@@ -335,7 +336,6 @@ class MeshView(QWidget):
                 self._pv_mesh.bounds[3] - self._pv_mesh.bounds[2],
                 self._pv_mesh.bounds[5] - self._pv_mesh.bounds[4],
             )
-            self.plotter.enable_ssao(radius=extent * 0.08, bias=extent * 0.002)
             self.plotter.enable_anti_aliasing("fxaa")
         except Exception:
             pass  # depth cues are cosmetic; never let them break the view
