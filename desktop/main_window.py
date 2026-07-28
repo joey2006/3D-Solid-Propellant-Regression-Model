@@ -86,6 +86,9 @@ class MainWindow(QMainWindow):
         self.simulation_panel = SimulationPanel()
 
         self.geometry_panel.open_requested.connect(self.open_mesh)
+        self.geometry_panel.recent_selected.connect(
+            lambda p: self.load_path(Path(p))
+        )
         self.geometry_panel.changed.connect(self._refresh_grid_metrics)
 
         self._docks: dict[str, QDockWidget] = {}
@@ -230,6 +233,7 @@ class MainWindow(QMainWindow):
         self.geometry_panel.set_file(self._path.name)
         self.close_action.setEnabled(True)
         self._remember_recent(self._path)
+        self.geometry_panel.select_recent(str(self._path))
 
         self.mesh_view.show_mesh(mesh)
         self._populate_data_view()
@@ -375,6 +379,9 @@ class MainWindow(QMainWindow):
     def _rebuild_recent_menu(self) -> None:
         self.recent_menu.clear()
         recent = [p for p in self._recent_files() if Path(p).exists()]
+        # The Geometry dock shows the same list; both are driven from here so
+        # they cannot drift apart.
+        self.geometry_panel.set_recent_files(recent)
         if not recent:
             empty = self.recent_menu.addAction("No recent files")
             empty.setEnabled(False)

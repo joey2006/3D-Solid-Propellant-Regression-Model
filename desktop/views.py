@@ -48,6 +48,8 @@ class MeshView(QWidget):
 
         self.plotter = None
         self._actor = None
+        self._cap_actor = None
+        self._built_wireframe = None
 
         if not HAVE_3D:
             layout.addWidget(self._unavailable())
@@ -80,14 +82,6 @@ class MeshView(QWidget):
             "grid spacing to judge whether the mesh is resolved."
         )
 
-        self.texture_button = QPushButton("Texture")
-        self.texture_button.setCheckable(True)
-        self.texture_button.setChecked(True)
-        self.texture_button.setToolTip(
-            "Soft surface mottling. Turn off for a perfectly smooth finish."
-        )
-        self.texture_button.toggled.connect(lambda _=False: self._render())
-        bar_layout.addWidget(self.texture_button)
 
         bar_layout.addStretch(1)
 
@@ -152,10 +146,9 @@ class MeshView(QWidget):
         # 128-sided bore (2.8 deg per facet) round while leaving slot corners
         # and end faces crisp.
         pv.global_theme.sharp_edges_feature_angle = 30.0
+        # The cut-face actor is created up front and starts empty.
+        pv.global_theme.allow_empty_mesh = True
 
-        # Built once and reused: regenerating noise per render would make
-        # the surface crawl as the section slider moves.
-        self._texture = self._grain_texture()
 
         self.plotter = QtInteractor(self)
         self.plotter.set_background(theme.VIEW_BG)
@@ -225,10 +218,9 @@ class MeshView(QWidget):
         their end rings, that gradient covers the entire end cap. Face colours
         do not interpolate, so each region reads as one flat tone.
 
-        Surface roughness is *not* done here. Tinting each face individually
-        produces stripes rather than grain, because a cylinder wall's triangles
-        span its full height -- so one face is one tall thin sliver. Roughness
-        comes from a texture instead; see :meth:`_apply_texture_coords`.
+        A surface texture was tried here and removed: it added nothing at the
+        scale the grain is viewed, and re-uploading it on every frame was a
+        plausible source of flicker while sectioning.
         """
         try:
             import numpy as np
@@ -262,200 +254,91 @@ class MeshView(QWidget):
             colours[alignment < -0.35] = rgb(theme.INTERIOR)  # bore
 
             mesh.cell_data["grain_rgb"] = colours
-            mesh = MeshView._apply_texture_coords(mesh)
-            return mesh
-        except Exception:
-            return mesh  # colouring is cosmetic; never block the view
-
-    # Grain size of the surface texture, in metres of real surface per tile.
-    # 4 mm across a 256 px tile is ~15 um per speck: fine sand, not gravel.
-    TEXTURE_TILE = 0.004
-
-    @staticmethod
-    def _apply_texture_coords(mesh):
-        """Give the mesh world-space UVs so a noise texture reads as fine sand.
-
-        Texture coordinates are derived from position rather than from any
-        parameterisation of the mesh, so the grain size is set in *metres of
-        real surface* and stays constant regardless of how coarsely the object
-        was tessellated. That is the whole point: per-face tinting scales with
-        the triangles and streaks, a texture does not.
-
-        Two projections, chosen per vertex from the normal:
-
-        * end faces (normal along the axis) project onto the XY plane;
-        * everything else -- outer wall, bore, slot walls -- wraps
-          cylindrically, using arc length so the texture is not stretched near
-          the axis.
-
-        ``split_vertices`` runs first so vertices are duplicated along sharp
-        creases. Without it a triangle could straddle the wall/cap boundary
-        with its corners on different projections, which smears the texture
-        across that face.
-        """
-        try:
-            import numpy as np
-
-            mesh = mesh.compute_normals(
+            # Split vertices along sharp creases so smooth shading rounds
+            # only genuinely curved regions, and bake the normals in --
+            # this is why the render loop can skip `split_sharp_edges`.
+            return mesh.compute_normals(
                 point_normals=True, cell_normals=False, split_vertices=True,
                 feature_angle=30, consistent_normals=True,
                 auto_orient_normals=False, inplace=False,
             )
-            points = np.asarray(mesh.points)
-            normals = np.asarray(mesh.point_data["Normals"])
-            origin = np.asarray(mesh.center)
+        except Exception:
+            return mesh  # colouring is cosmetic; never block the view
 
-            x = points[:, 0] - origin[0]
-            y = points[:, 1] - origin[1]
-            radius = np.hypot(x, y)
-            axial = np.abs(normals[:, 2]) > 0.7
 
-            uv = np.empty((len(points), 2))
-            uv[:, 0] = np.where(
-                axial, x, np.arctan2(y, x) * np.maximum(radius, 1e-9)
-            )
-            uv[:, 1] = np.where(axial, y, points[:, 2])
-
-            mesh.active_texture_coordinates = (
-                uv / MeshView.TEXTURE_TILE
-            ).astype(np.float32)
-            return mesh
         except Exception:
             return mesh
 
-    @staticmethod
-    def _grain_texture():
-        """A soft, seamless mottle modulated over the base colour.
 
-        Per-pixel white noise is what makes a surface look like television
-        static and is genuinely unpleasant to look at: its energy sits at the
-        highest representable frequency, so once the texture is minified on
-        screen it aliases and crawls under any camera movement.
-
-        Two things fix that. The noise is **low-pass filtered in the Fourier
-        domain**, which both removes the high-frequency energy and -- because
-        the FFT treats the image as periodic -- leaves it seamlessly tileable,
-        so no seam appears where the texture wraps. And the texture is
-        **mip-mapped**, so minified areas sample a pre-filtered smaller level
-        instead of undersampling the full-resolution one.
-
-        The result reads as the soft mottling of a cast composite rather than
-        as speckle. Contrast is deliberately very low.
-        """
-        import numpy as np
-        import vtk
-
-        size = 256
-        rng = np.random.default_rng(12345)
-        field = rng.normal(0.0, 1.0, (size, size))
-
-        # Gaussian low-pass. `cutoff` is in cycles across the tile: larger is
-        # finer grain. ~14 gives blobs around 18 px, which stays soft on screen.
-        cutoff = 14.0
-        freq = np.fft.fftfreq(size) * size
-        kx, ky = np.meshgrid(freq, freq, indexing="ij")
-        spectrum = np.fft.fft2(field) * np.exp(-((np.hypot(kx, ky) / cutoff) ** 2))
-        smooth = np.real(np.fft.ifft2(spectrum))
-        smooth /= max(float(np.abs(smooth).max()), 1e-12)
-
-        # +/- 5 levels out of 255: visible as texture, invisible as noise.
-        grey = np.clip(242.0 + smooth * 5.0, 0, 255).astype("uint8")
-
-        texture = pv.Texture(np.repeat(grey[:, :, None], 3, axis=2))
-        texture.repeat = True
-        texture.interpolate = True
-        texture.mipmap = True
-        texture.SetBlendingMode(
-            vtk.vtkTexture.VTK_TEXTURE_BLENDING_MODE_MODULATE
-        )
-        return texture
-
-    def _active_texture(self):
-        """The grain texture, or None when the user has switched it off."""
-        return self._texture if self.texture_button.isChecked() else None
 
     def _render(self, reset_camera: bool = False) -> None:
-        """Draw the cached mesh at the current style and section position."""
+        """Draw the cached mesh at the current style and section position.
+
+        Actors are created once and then *updated in place*. The previous
+        version cleared the renderer and re-added everything on every frame,
+        which tears down and rebuilds the whole VTK pipeline 60 times a second
+        -- and leaves a window in which the scene is momentarily empty, which
+        is visible as the model flickering see-through while sectioning.
+        Swapping the mapper's input keeps the actors alive throughout.
+        """
         if self.plotter is None or getattr(self, "_pv_mesh", None) is None:
             return
 
         mesh, cap = self._sectioned_mesh()
         wireframe = self._style == "wireframe"
-
-        # Every render clears and re-adds the actors, and `add_mesh` resets the
-        # camera whenever it is adding the first actor to a renderer -- which
-        # after a clear() is always. Left alone, that re-frames the view on
-        # every slider tick, so a shrinking cut appears to zoom and distort.
-        # Capture the camera and put it back.
         camera = None if reset_camera else self.plotter.camera_position
 
-        self.plotter.clear()
-        if mesh is not None and mesh.n_points:
-            has_region = (
-                not wireframe and "grain_rgb" in getattr(mesh, "cell_data", {})
-            )
+        # A style change alters actor properties rather than data, so it is the
+        # one case that still warrants a rebuild. It happens on a click, not on
+        # a drag, so the cost is irrelevant.
+        if self._actor is None or self._built_wireframe != wireframe:
+            self.plotter.clear()
             self._actor = self.plotter.add_mesh(
                 mesh,
                 style="wireframe" if wireframe else "surface",
-                # Direct per-face RGB rather than a colour map: no scalar range
-                # to interpolate, so the three regions stay flat and the
-                # roughness jitter survives exactly as computed.
-                scalars="grain_rgb" if has_region else None,
-                rgb=has_region or None,
-                # Fine noise multiplied over the flat region tones. World-space
-                # UVs mean the grain stays the same physical size whatever the
-                # tessellation, which is what per-face tinting could not do.
-                texture=self._active_texture() if not wireframe else None,
+                scalars="grain_rgb" if not wireframe else None,
+                rgb=True if not wireframe else None,
                 show_scalar_bar=False,
-                color=None if has_region else theme.SURFACE,
+                color=None if not wireframe else theme.SURFACE,
                 line_width=1,
                 reset_camera=False,
-                # Surface mode reads as a solid object: normals are averaged
-                # across neighbouring facets so a 128-sided bore looks round
-                # rather than polygonal. `split_sharp_edges` keeps that from
-                # rounding off genuine creases -- slot corners and end faces
-                # stay crisp, because smoothing is only applied where the angle
-                # between facets is below the theme's sharp-edge feature angle
-                # (set in __init__). Tessellation stays inspectable via
-                # Wireframe.
                 smooth_shading=not wireframe,
-                # Normals (already split along sharp creases) are baked
-                # into the mesh at load, so re-splitting every frame just
-                # repeats work: ~2.6 ms per frame for an identical result.
+                # Crease-split normals are baked in at load, so re-deriving
+                # them every frame would repeat ~2.6 ms of work for no change.
                 split_sharp_edges=False,
                 specular=0.08,
                 specular_power=8,
             )
-
-        # The cut face gets a paler, matte treatment so it reads as exposed
-        # material rather than as more outer surface -- the same convention a
-        # CAD section view uses. Always flat: it is planar by construction.
-        if cap is not None and not wireframe:
-            cap_actor = self.plotter.add_mesh(
-                cap,
+            self._cap_actor = self.plotter.add_mesh(
+                pv.PolyData(),
                 color=theme.CUT_FACE,
                 smooth_shading=False,
                 specular=0.0,
                 show_edges=False,
                 reset_camera=False,
-                texture=self._active_texture(),
             )
-            # The cut face lies exactly on the plane the body was clipped with,
-            # so the two are coplanar and the depth buffer cannot separate them.
-            # The result is z-fighting: the cap flickers away for a frame and
-            # the grain appears see-through. Polygon offset biases the cap
-            # fractionally toward the camera in depth only -- it does not move
-            # the geometry, so the cut stays exactly where the user put it.
+            # The cut face is coplanar with the plane the body was clipped on,
+            # so the depth buffer cannot separate them and they z-fight.
+            # Polygon offset biases the cap in depth only -- the geometry does
+            # not move, so the cut stays exactly where the user put it.
             try:
-                mapper = cap_actor.GetMapper()
+                mapper = self._cap_actor.GetMapper()
                 mapper.SetResolveCoincidentTopologyToPolygonOffset()
                 mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(
-                    -2.0, -2.0
+                    -4.0, -4.0
                 )
             except Exception:
-                pass  # depth tuning is cosmetic; never let it break the view
+                pass
+            self.plotter.add_axes()
+            self._built_wireframe = wireframe
+        else:
+            self._actor.GetMapper().SetInputData(mesh)
 
-        self.plotter.add_axes()
+        if cap is not None and not wireframe and cap.n_points:
+            self._cap_actor.GetMapper().SetInputData(cap)
+            self._cap_actor.SetVisibility(True)
+        else:
+            self._cap_actor.SetVisibility(False)
 
         if reset_camera:
             self.plotter.view_isometric()
@@ -464,26 +347,6 @@ class MeshView(QWidget):
             self.plotter.camera_position = camera
 
         self.plotter.render()
-
-    def _apply_depth_effects(self) -> None:
-        """Configure anti-aliasing. Called **once**, at construction.
-
-        This used to run on every render, where it measured 44 ms per frame --
-        by far the largest cost in the loop and the reason dragging the section
-        slider was choppy. It is a renderer state change, not per-frame work.
-        """
-        try:
-            # The occlusion radius is a world-space distance, so it has to
-            # track the model's scale: a value tuned for a 0.1 m grain does
-            # nothing on a 100 mm one.
-            extent = max(
-                self._pv_mesh.bounds[1] - self._pv_mesh.bounds[0],
-                self._pv_mesh.bounds[3] - self._pv_mesh.bounds[2],
-                self._pv_mesh.bounds[5] - self._pv_mesh.bounds[4],
-            )
-            self.plotter.enable_anti_aliasing("fxaa")
-        except Exception:
-            pass  # depth cues are cosmetic; never let them break the view
 
     # --- Sectioning -------------------------------------------------------
 
@@ -648,9 +511,6 @@ class MeshView(QWidget):
         self._style = "surface"
         self.surface_button.setChecked(True)
         self.wireframe_button.setChecked(False)
-        self.texture_button.blockSignals(True)
-        self.texture_button.setChecked(True)
-        self.texture_button.blockSignals(False)
 
         self._update_section_readout()
         self._render(reset_camera=True)
@@ -660,6 +520,11 @@ class MeshView(QWidget):
             self.plotter.clear()
             self._mesh = None
             self._pv_mesh = None
+            # Drop the actor handles too: plotter.clear() destroyed them, and a
+            # stale reference would be updated instead of a fresh actor built.
+            self._actor = None
+            self._cap_actor = None
+            self._built_wireframe = None
             self._set_section_enabled(False)
             self._empty.show()
 

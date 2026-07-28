@@ -36,6 +36,8 @@ class GeometryPanel(QWidget):
 
     changed = Signal()
     open_requested = Signal()
+    #: Emitted with a path when the user picks a previously opened file.
+    recent_selected = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -77,6 +79,13 @@ class GeometryPanel(QWidget):
         )
         self.file_label.setWordWrap(True)
         source_layout.addWidget(self.file_label)
+
+        # Previously opened files, so switching between them does not mean
+        # navigating the file dialog again.
+        self.recent_combo = QComboBox()
+        self.recent_combo.setToolTip("Files you have opened before.")
+        self.recent_combo.activated.connect(self._on_recent_picked)
+        source_layout.addWidget(FieldRow("Recent", self.recent_combo))
 
         self.open_button = QPushButton("Open mesh...")
         self.open_button.setProperty("accent", True)
@@ -183,6 +192,37 @@ class GeometryPanel(QWidget):
         layout.addStretch(1)
 
         self._on_resolution()
+
+    def set_recent_files(self, paths: list[str]) -> None:
+        """Populate the recent-files dropdown. Paths are stored on each item."""
+        from pathlib import Path
+
+        self.recent_combo.blockSignals(True)
+        self.recent_combo.clear()
+        if not paths:
+            self.recent_combo.addItem("(none yet)")
+            self.recent_combo.setEnabled(False)
+        else:
+            self.recent_combo.setEnabled(True)
+            for entry in paths:
+                self.recent_combo.addItem(Path(entry).name, entry)
+                self.recent_combo.setItemData(
+                    self.recent_combo.count() - 1, entry, Qt.ToolTipRole
+                )
+        self.recent_combo.blockSignals(False)
+
+    def select_recent(self, path: str) -> None:
+        """Show ``path`` as the current entry without emitting a signal."""
+        index = self.recent_combo.findData(path)
+        if index >= 0:
+            self.recent_combo.blockSignals(True)
+            self.recent_combo.setCurrentIndex(index)
+            self.recent_combo.blockSignals(False)
+
+    def _on_recent_picked(self, index: int) -> None:
+        path = self.recent_combo.itemData(index)
+        if path:
+            self.recent_selected.emit(str(path))
 
     def _on_resolution(self) -> None:
         n = self.resolution_points()
