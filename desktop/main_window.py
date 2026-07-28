@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
 )
 
+from srm_burnback.geometry.measurements import grain_measurements
 from srm_burnback.geometry.import_mesh import (
     CAD_SUFFIXES,
     MESH_SUFFIXES,
@@ -35,7 +36,12 @@ from srm_burnback.geometry.import_mesh import (
 )
 
 from . import theme
-from .panels import GeometryPanel, PropellantPanel, SimulationPanel
+from .panels import (
+    GeometryPanel,
+    MeasurementsPanel,
+    PropellantPanel,
+    SimulationPanel,
+)
 from .views import FieldView, MeshDataView, MeshView
 from .workers import MeshLoadWorker
 
@@ -82,6 +88,7 @@ class MainWindow(QMainWindow):
 
     def _build_docks(self) -> None:
         self.geometry_panel = GeometryPanel()
+        self.measurements_panel = MeasurementsPanel()
         self.propellant_panel = PropellantPanel()
         self.simulation_panel = SimulationPanel()
 
@@ -90,14 +97,19 @@ class MainWindow(QMainWindow):
             lambda p: self.load_path(Path(p))
         )
         self.geometry_panel.changed.connect(self._refresh_grid_metrics)
+        # Mass is volume x density, so it has to follow the propellant panel.
+        self.propellant_panel.changed.connect(self._refresh_measurements)
 
         self._docks: dict[str, QDockWidget] = {}
         self._add_dock("Geometry", self.geometry_panel, Qt.LeftDockWidgetArea)
+        self._add_dock(
+            "Measurements", self.measurements_panel, Qt.LeftDockWidgetArea
+        )
         self._add_dock("Propellant", self.propellant_panel, Qt.RightDockWidgetArea)
         self._add_dock("Simulation", self.simulation_panel, Qt.RightDockWidgetArea)
 
         self.resizeDocks(
-            list(self._docks.values()), [330, 330, 330], Qt.Horizontal
+            list(self._docks.values()), [330] * len(self._docks), Qt.Horizontal
         )
 
     def _add_dock(self, title: str, widget, area) -> None:
@@ -237,6 +249,7 @@ class MainWindow(QMainWindow):
 
         self.mesh_view.show_mesh(mesh)
         self._populate_data_view()
+        self._refresh_measurements()
         self._refresh_grid_metrics()
 
         self.status_message.setText(
@@ -256,6 +269,7 @@ class MainWindow(QMainWindow):
         self.close_action.setEnabled(False)
         self.mesh_view.clear()
         self.data_view.clear()
+        self.measurements_panel.clear()
         self._refresh_grid_metrics()
         self.status_message.setText("Ready")
 
@@ -324,6 +338,22 @@ class MainWindow(QMainWindow):
                 "for metres.",
                 "ok",
             )
+
+    def _refresh_measurements(self) -> None:
+        """Recompute grain dimensions for the current mesh and density."""
+        if self._mesh is None:
+            self.measurements_panel.clear()
+            return
+        try:
+            self.measurements_panel.set_measurements(
+                grain_measurements(
+                    self._mesh, density=self.propellant_panel.density.value()
+                )
+            )
+        except Exception:
+            # Dimensions are informational; a mesh too odd to measure must not
+            # stop it being viewed.
+            self.measurements_panel.clear()
 
     def _refresh_grid_metrics(self) -> None:
         """Update the grid tiles. Cheap enough to run on every slider tick."""

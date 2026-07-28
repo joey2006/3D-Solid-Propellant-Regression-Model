@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QPushButton,
     QSlider,
@@ -110,8 +111,6 @@ class GeometryPanel(QWidget):
         self.resolution_value.setMinimumWidth(78)
 
         row = QWidget()
-        from PySide6.QtWidgets import QHBoxLayout
-
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(8)
@@ -423,3 +422,93 @@ class SimulationPanel(QWidget):
         layout.addWidget(blocked)
 
         layout.addStretch(1)
+
+
+class MeasurementsPanel(QWidget):
+    """Engineering dimensions of the loaded grain.
+
+    Deliberately in millimetres and grams rather than the metres and kilograms
+    the engine works in: a 40 mm web is legible, 0.0399893 m is not. The
+    conversion happens here, at the very edge, so nothing upstream has to care
+    about display units.
+    """
+
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        self._rows: dict[str, QLabel] = {}
+        for key, label, tip in (
+            ("length", "Length", "Extent along the grain axis."),
+            ("outer_diameter", "Outer dia.", "Across the outer wall."),
+            ("bore_diameter", "Bore dia.", "Across the narrowest inward-facing surface."),
+            ("web_thickness", "Web", "Propellant between bore and outer wall — "
+                                     "what has to burn through."),
+            ("length_to_diameter", "L/D", "Length over outer diameter."),
+            ("volume", "Volume", "Propellant volume. Needs a closed surface."),
+            ("mass", "Mass", "Volume times the density set in the Propellant panel."),
+            ("port_fraction", "Port fraction", "Share of the envelope that is void. "
+                                               "A near-zero value means no bore was found."),
+        ):
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            name = QLabel(label)
+            name.setStyleSheet(f"color:{theme.TEXT_MUTED}; font-size:12px;")
+            value = QLabel("--")
+            value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            value.setStyleSheet(
+                f"color:{theme.TEXT}; font-family:{theme.FONT_MONO}; font-size:13px;"
+            )
+            row_layout.addWidget(name)
+            row_layout.addStretch(1)
+            row_layout.addWidget(value)
+            row.setToolTip(tip)
+            layout.addWidget(row)
+            self._rows[key] = value
+
+        layout.addWidget(
+            hint(
+                "Measured from the imported geometry, not entered by hand — "
+                "an uploaded object arrives as triangles with no parameters "
+                "attached, so the bore and web are recovered from the surface "
+                "normals."
+            )
+        )
+        layout.addStretch(1)
+
+    def clear(self) -> None:
+        for value in self._rows.values():
+            value.setText("--")
+
+    def set_measurements(self, data: dict) -> None:
+        """Render a :func:`grain_measurements` result."""
+
+        def mm(x):
+            return "--" if x is None else f"{x * 1000:.2f} mm"
+
+        self._rows["length"].setText(mm(data["length"]))
+        self._rows["outer_diameter"].setText(mm(data["outer_diameter"]))
+        self._rows["bore_diameter"].setText(mm(data["bore_diameter"]))
+        self._rows["web_thickness"].setText(mm(data["web_thickness"]))
+
+        ld = data["length_to_diameter"]
+        self._rows["length_to_diameter"].setText("--" if ld is None else f"{ld:.2f}")
+
+        volume = data["volume"]
+        self._rows["volume"].setText(
+            "--" if volume is None else f"{volume * 1e6:.1f} cm³"
+        )
+
+        mass = data["mass"]
+        if mass is None:
+            self._rows["mass"].setText("--")
+        elif mass < 1.0:
+            self._rows["mass"].setText(f"{mass * 1000:.0f} g")
+        else:
+            self._rows["mass"].setText(f"{mass:.3f} kg")
+
+        port = data["port_fraction"]
+        self._rows["port_fraction"].setText("--" if port is None else f"{port:.1%}")
