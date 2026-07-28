@@ -80,6 +80,15 @@ class MeshView(QWidget):
             "grid spacing to judge whether the mesh is resolved."
         )
 
+        self.texture_button = QPushButton("Texture")
+        self.texture_button.setCheckable(True)
+        self.texture_button.setChecked(True)
+        self.texture_button.setToolTip(
+            "Soft surface mottling. Turn off for a perfectly smooth finish."
+        )
+        self.texture_button.toggled.connect(lambda _=False: self._render())
+        bar_layout.addWidget(self.texture_button)
+
         bar_layout.addStretch(1)
 
         reset = QPushButton("Reset view")
@@ -305,24 +314,54 @@ class MeshView(QWidget):
 
     @staticmethod
     def _grain_texture():
-        """A fine, isotropic noise texture, modulated over the base colour.
+        """A soft, seamless mottle modulated over the base colour.
 
-        Deliberately low contrast: this should read as the tooth of a cast
-        composite propellant, not as visible speckle. MODULATE blending
-        multiplies it into whatever colour the face already has, so the three
-        surface regions keep their distinct tones.
+        Per-pixel white noise is what makes a surface look like television
+        static and is genuinely unpleasant to look at: its energy sits at the
+        highest representable frequency, so once the texture is minified on
+        screen it aliases and crawls under any camera movement.
+
+        Two things fix that. The noise is **low-pass filtered in the Fourier
+        domain**, which both removes the high-frequency energy and -- because
+        the FFT treats the image as periodic -- leaves it seamlessly tileable,
+        so no seam appears where the texture wraps. And the texture is
+        **mip-mapped**, so minified areas sample a pre-filtered smaller level
+        instead of undersampling the full-resolution one.
+
+        The result reads as the soft mottling of a cast composite rather than
+        as speckle. Contrast is deliberately very low.
         """
         import numpy as np
         import vtk
 
+        size = 256
         rng = np.random.default_rng(12345)
-        noise = rng.normal(238, 11, (256, 256, 1)).clip(0, 255).astype("uint8")
-        texture = pv.Texture(np.repeat(noise, 3, axis=2))
+        field = rng.normal(0.0, 1.0, (size, size))
+
+        # Gaussian low-pass. `cutoff` is in cycles across the tile: larger is
+        # finer grain. ~14 gives blobs around 18 px, which stays soft on screen.
+        cutoff = 14.0
+        freq = np.fft.fftfreq(size) * size
+        kx, ky = np.meshgrid(freq, freq, indexing="ij")
+        spectrum = np.fft.fft2(field) * np.exp(-((np.hypot(kx, ky) / cutoff) ** 2))
+        smooth = np.real(np.fft.ifft2(spectrum))
+        smooth /= max(float(np.abs(smooth).max()), 1e-12)
+
+        # +/- 5 levels out of 255: visible as texture, invisible as noise.
+        grey = np.clip(242.0 + smooth * 5.0, 0, 255).astype("uint8")
+
+        texture = pv.Texture(np.repeat(grey[:, :, None], 3, axis=2))
         texture.repeat = True
+        texture.interpolate = True
+        texture.mipmap = True
         texture.SetBlendingMode(
             vtk.vtkTexture.VTK_TEXTURE_BLENDING_MODE_MODULATE
         )
         return texture
+
+    def _active_texture(self):
+        """The grain texture, or None when the user has switched it off."""
+        return self._texture if self.texture_button.isChecked() else None
 
     def _render(self, reset_camera: bool = False) -> None:
         """Draw the cached mesh at the current style and section position."""
@@ -355,7 +394,7 @@ class MeshView(QWidget):
                 # Fine noise multiplied over the flat region tones. World-space
                 # UVs mean the grain stays the same physical size whatever the
                 # tessellation, which is what per-face tinting could not do.
-                texture=self._texture if not wireframe else None,
+                texture=self._active_texture() if not wireframe else None,
                 show_scalar_bar=False,
                 color=None if has_region else theme.SURFACE,
                 line_width=1,
@@ -385,7 +424,7 @@ class MeshView(QWidget):
                 specular=0.0,
                 show_edges=False,
                 reset_camera=False,
-                texture=self._texture,
+                texture=self._active_texture(),
             )
 
         self.plotter.add_axes()
@@ -578,6 +617,9 @@ class MeshView(QWidget):
         self._style = "surface"
         self.surface_button.setChecked(True)
         self.wireframe_button.setChecked(False)
+        self.texture_button.blockSignals(True)
+        self.texture_button.setChecked(True)
+        self.texture_button.blockSignals(False)
 
         self._update_section_readout()
         self._render(reset_camera=True)

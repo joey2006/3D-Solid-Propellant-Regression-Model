@@ -65,7 +65,8 @@ class GeometryPanel(QWidget):
         source_layout.addWidget(
             hint(
                 "Where the shape comes from. Only imported meshes are wired "
-                "up today: you supply an STL/OBJ and it becomes the grain. "
+                "up today: you supply a mesh (STL/OBJ/PLY) or a CAD file "
+                "(STEP/STP) and it becomes the grain. "
                 "The parametric options are a later addition (#135)."
             )
         )

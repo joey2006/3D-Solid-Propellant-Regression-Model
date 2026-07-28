@@ -21,8 +21,20 @@ Units
 Mesh files carry no reliable unit declaration (STL in particular has none), so
 the numbers are taken as-is. ``mesh_stats`` reports the bounding box precisely
 so a unit mismatch is obvious on sight: a grain measuring 50 x 50 x 120 is
-millimetres, while 0.05 x 0.05 x 0.12 is metres. Native CAD formats *do* declare
-units -- that is handled separately in #170.
+millimetres, while 0.05 x 0.05 x 0.12 is metres.
+
+Native CAD files *do* declare units internally, but the conversion goes through
+OpenCASCADE and lands in millimetres, whereas the simulation works in metres.
+So a STEP grain typically arrives 1000x too large and needs scaling. The extent
+warning is what surfaces this; automatic handling is #170.
+
+CAD versus mesh input
+---------------------
+STEP files are boundary representations -- exact analytic surfaces, not
+triangles. Loading one *tessellates* it, and the tessellation tolerance is
+chosen by the converter rather than by us. That matters because tessellation
+density is what limits how accurately an imported grain matches its analytical
+counterpart (#158). Control over that tolerance is #161.
 """
 
 from __future__ import annotations
@@ -35,7 +47,14 @@ from .CoordinateBuilder import build_coords
 from .GrainGeometry import Coords
 
 # Extensions trimesh handles that make sense as a grain source.
-SUPPORTED_SUFFIXES = {".stl", ".obj", ".ply", ".off", ".glb", ".gltf"}
+MESH_SUFFIXES = {".stl", ".obj", ".ply", ".off", ".glb", ".gltf", ".3mf"}
+
+# Native CAD (#161). These are B-rep formats, not meshes: the file describes
+# exact surfaces, and a tessellation is generated on load. Handled by trimesh
+# via the `cascadio` backend (OpenCASCADE), which is an optional dependency.
+CAD_SUFFIXES = {".step", ".stp"}
+
+SUPPORTED_SUFFIXES = MESH_SUFFIXES | CAD_SUFFIXES
 
 
 class MeshImportError(RuntimeError):
@@ -72,11 +91,21 @@ def load_mesh(path: str | Path):
         ) from exc
 
     path = Path(path)
-    if path.suffix.lower() not in SUPPORTED_SUFFIXES:
+    suffix = path.suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
         supported = ", ".join(sorted(SUPPORTED_SUFFIXES))
         raise MeshImportError(
             f"unsupported mesh format '{path.suffix}'. Supported: {supported}"
         )
+
+    if suffix in CAD_SUFFIXES:
+        try:
+            import cascadio  # noqa: F401  (registers the STEP loader)
+        except ImportError as exc:
+            raise MeshImportError(
+                f"reading '{path.suffix}' CAD files needs the `cascadio` "
+                "backend. Install it with `pip install cascadio`."
+            ) from exc
 
     try:
         loaded = trimesh.load_mesh(str(path))
