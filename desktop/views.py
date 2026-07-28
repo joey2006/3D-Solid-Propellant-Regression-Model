@@ -32,6 +32,16 @@ except Exception:  # pragma: no cover - depends on local VTK/Qt install
     HAVE_3D = False
 
 
+def _region_cmap():
+    """Colour map for the surface-region scalar: -1 bore, 0 ends, +1 outer."""
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list(
+        "grain_region",
+        [theme.INTERIOR, theme.CUT_FACE, theme.SURFACE],
+    )
+
+
 class MeshView(QWidget):
     """Interactive 3D view of the imported mesh.
 
@@ -171,11 +181,54 @@ class MeshView(QWidget):
         self._mesh = mesh
         # Wrapping copies the geometry, so cache it: the section slider
         # re-renders on every tick and must not re-convert each time.
-        self._pv_mesh = pv.wrap(mesh)
+        self._pv_mesh = self._classify_surface(pv.wrap(mesh))
 
         self._set_section_enabled(True)
         self._update_section_readout()
         self._render(reset_camera=True)
+
+    @staticmethod
+    def _classify_surface(mesh):
+        """Tag every point with which *kind* of surface it belongs to.
+
+        Colour has to distinguish the bore from the outer wall, and neither
+        back-face darkening nor ambient occlusion can do it. Back-face
+        darkening fails because a bore's normals point inward toward the axis,
+        so through a cutaway you see its *front* faces. Occlusion is a
+        screen-space effect and washes out at exactly the shallow viewing
+        angles where the bore is hardest to find.
+
+        Geometry answers it directly: on a grain, the outer wall's normal
+        points radially outward from the motor axis and the bore's points
+        radially inward. So the dot product of the surface normal with the
+        outward radial direction is +1 on the outer wall, -1 in the bore, and
+        ~0 on the end faces. That scalar drives the colour map, which makes the
+        bore unmistakable from any angle rather than only when lined up.
+        """
+        try:
+            import numpy as np
+
+            mesh = mesh.compute_normals(
+                point_normals=True, cell_normals=False, consistent_normals=True,
+                auto_orient_normals=False, inplace=False,
+            )
+            normals = np.asarray(mesh.point_data["Normals"])
+            points = np.asarray(mesh.points)
+
+            centre = np.asarray(mesh.center)
+            # Radial direction about the z axis, which is the grain axis.
+            radial = points[:, :2] - centre[:2]
+            length = np.linalg.norm(radial, axis=1, keepdims=True)
+            radial = np.divide(
+                radial, length, out=np.zeros_like(radial), where=length > 1e-12
+            )
+
+            mesh.point_data["region"] = np.einsum(
+                "ij,ij->i", normals[:, :2], radial
+            ).astype(np.float32)
+            return mesh
+        except Exception:
+            return mesh  # colouring is cosmetic; never block the view
 
     def _render(self, reset_camera: bool = False) -> None:
         """Draw the cached mesh at the current style and section position."""
@@ -194,10 +247,25 @@ class MeshView(QWidget):
 
         self.plotter.clear()
         if mesh is not None and mesh.n_points:
+            has_region = (
+                not wireframe and "region" in getattr(mesh, "point_data", {})
+            )
             self._actor = self.plotter.add_mesh(
                 mesh,
                 style="wireframe" if wireframe else "surface",
-                color=theme.SURFACE,
+                # Colour by which surface it is when the classification is
+                # available, falling back to a flat colour otherwise.
+                scalars="region" if has_region else None,
+                cmap=_region_cmap() if has_region else None,
+                # Not (-1, 1): point normals are averaged over adjoining faces,
+                # and on a cylinder whose side wall has vertices only at its
+                # end rings every wall vertex is shared with an end cap, so the
+                # dot product saturates near +/-0.7 rather than +/-1. Mapping
+                # to that range is what makes the bore reach full dark instead
+                # of stopping at a mid grey.
+                clim=(-0.7, 0.7) if has_region else None,
+                show_scalar_bar=False,
+                color=None if has_region else theme.SURFACE,
                 line_width=1,
                 reset_camera=False,
                 # Surface mode reads as a solid object: normals are averaged
@@ -291,6 +359,9 @@ class MeshView(QWidget):
         lo, hi = bounds[2 * axis], bounds[2 * axis + 1]
         amount = self.section_slider.value() / 1000.0
         fraction = 1.0 - amount if self._section_invert else amount
+        # Keep the plane off the bounds themselves: a cut coincident with an
+        # end face makes the cap and that face z-fight into speckled garbage.
+        fraction = min(max(fraction, 0.002), 0.998)
         return lo + (hi - lo) * fraction
 
     def _sectioned_mesh(self):
@@ -303,6 +374,14 @@ class MeshView(QWidget):
         leaves the bore open instead of capping the grain into a solid rod.
         """
         if not self.section_button.isChecked():
+            return self._pv_mesh, None
+
+        # At the extremes the cut plane lands exactly on an end face, so the
+        # cap and that face render coplanar and z-fight -- which shows up as
+        # the surface tearing into discoloured patches. Below a hair of travel,
+        # show the intact grain instead; _section_position keeps the plane
+        # inset from the bounds for everything above it.
+        if self.section_slider.value() <= 2:
             return self._pv_mesh, None
 
         axis = self._section_axis_index()
