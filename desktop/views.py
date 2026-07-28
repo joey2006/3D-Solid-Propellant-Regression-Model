@@ -113,7 +113,8 @@ class MeshView(QWidget):
 
         self.section_slider = QSlider(Qt.Horizontal)
         self.section_slider.setRange(0, 1000)
-        self.section_slider.setValue(500)
+        self.section_slider.setValue(0)  # start intact, cut in from there
+        self.section_slider.setToolTip("How much of the grain to cut away.")
         self.section_slider.valueChanged.connect(self._on_section_changed)
         section_layout.addWidget(self.section_slider, 1)
 
@@ -126,7 +127,7 @@ class MeshView(QWidget):
         section_layout.addWidget(self.section_readout)
 
         self.section_flip = QPushButton("Flip")
-        self.section_flip.setToolTip("Keep the other half instead.")
+        self.section_flip.setToolTip("Cut in from the opposite end instead.")
         self.section_flip.clicked.connect(self._on_flip)
         section_layout.addWidget(self.section_flip)
 
@@ -203,6 +204,15 @@ class MeshView(QWidget):
                 split_sharp_edges=not wireframe,
                 specular=0.3,
                 specular_power=15,
+                # Back-facing geometry -- the inside of the bore, the far wall
+                # seen through a cutaway -- is drawn markedly darker. Without
+                # this, interior and exterior are the same colour and the
+                # opened-up grain reads as one flat silhouette.
+                backface_params=(
+                    None
+                    if wireframe
+                    else {"color": theme.INTERIOR, "specular": 0.05}
+                ),
             )
 
         # The cut face gets a paler, matte treatment so it reads as exposed
@@ -230,11 +240,20 @@ class MeshView(QWidget):
         return {0: 2, 1: 0, 2: 1}[self.section_axis.currentIndex()]
 
     def _section_position(self) -> float:
-        """Slider fraction mapped onto the mesh bounds along the chosen axis."""
+        """Cut-plane coordinate for the current slider setting.
+
+        The slider reads as *how much is cut away*, not as an absolute
+        coordinate: 0 is the intact grain and 1000 is fully cut, in whichever
+        direction Flip has selected. Mapping it this way means enabling Section
+        never makes half the grain vanish at once, and flipping direction never
+        lands on an empty view.
+        """
         axis = self._section_axis_index()
         bounds = self._pv_mesh.bounds
         lo, hi = bounds[2 * axis], bounds[2 * axis + 1]
-        return lo + (hi - lo) * (self.section_slider.value() / 1000.0)
+        amount = self.section_slider.value() / 1000.0
+        fraction = 1.0 - amount if self._section_invert else amount
+        return lo + (hi - lo) * fraction
 
     def _sectioned_mesh(self):
         """``(body, cap)`` for the current cut; ``cap`` may be ``None``.

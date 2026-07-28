@@ -43,6 +43,11 @@ VIEW_BG = "#202426"
 # instantly distinguishable from outer surface -- the CAD section convention.
 CUT_FACE = "#e8b48c"
 
+# Interior (back-facing) surfaces, e.g. the far wall of the bore seen through
+# a cutaway. Markedly darker than the outer skin so inside and outside do not
+# blend into one silhouette once the grain is opened up.
+INTERIOR = "#6d3418"
+
 FONT = "Segoe UI, Inter, system-ui, sans-serif"
 FONT_MONO = "Cascadia Mono, Consolas, monospace"
 
