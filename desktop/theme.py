@@ -39,14 +39,14 @@ ERROR = "#cf5f5f"
 # silhouette reads clearly against it.
 VIEW_BG = "#202426"
 
-# Exposed material on a section cut: paler and matte, so a cut face is
-# instantly distinguishable from outer surface -- the CAD section convention.
-CUT_FACE = "#e8b48c"
-
-# Interior (back-facing) surfaces, e.g. the far wall of the bore seen through
-# a cutaway. Markedly darker than the outer skin so inside and outside do not
-# blend into one silhouette once the grain is opened up.
-INTERIOR = "#6d3418"
+# --- Grain render palette -------------------------------------------------
+# Neutral greys rather than a saturated colour: the shape is what matters, and
+# grey shows shading gradients far more legibly than a strong hue, which tends
+# to flatten into a single silhouette. Value descends outward -> cut -> inside,
+# so depth is readable from brightness alone.
+SURFACE = "#b6bbc0"    # outer skin, the lightest thing on screen
+CUT_FACE = "#8f959b"   # exposed material at a section plane
+INTERIOR = "#5f666c"   # back-facing geometry seen through a cutaway
 
 FONT = "Segoe UI, Inter, system-ui, sans-serif"
 FONT_MONO = "Cascadia Mono, Consolas, monospace"

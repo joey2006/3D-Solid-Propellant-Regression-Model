@@ -185,13 +185,21 @@ class MeshView(QWidget):
         mesh, cap = self._sectioned_mesh()
         wireframe = self._style == "wireframe"
 
+        # Every render clears and re-adds the actors, and `add_mesh` resets the
+        # camera whenever it is adding the first actor to a renderer -- which
+        # after a clear() is always. Left alone, that re-frames the view on
+        # every slider tick, so a shrinking cut appears to zoom and distort.
+        # Capture the camera and put it back.
+        camera = None if reset_camera else self.plotter.camera_position
+
         self.plotter.clear()
         if mesh is not None and mesh.n_points:
             self._actor = self.plotter.add_mesh(
                 mesh,
                 style="wireframe" if wireframe else "surface",
-                color=theme.ACCENT,
+                color=theme.SURFACE,
                 line_width=1,
+                reset_camera=False,
                 # Surface mode reads as a solid object: normals are averaged
                 # across neighbouring facets so a 128-sided bore looks round
                 # rather than polygonal. `split_sharp_edges` keeps that from
@@ -204,10 +212,10 @@ class MeshView(QWidget):
                 split_sharp_edges=not wireframe,
                 specular=0.3,
                 specular_power=15,
-                # Back-facing geometry -- the inside of the bore, the far wall
-                # seen through a cutaway -- is drawn markedly darker. Without
-                # this, interior and exterior are the same colour and the
-                # opened-up grain reads as one flat silhouette.
+                # Back-facing geometry is drawn darker. This catches surfaces
+                # turned away from the camera; the bore itself is handled by
+                # SSAO in _apply_depth_effects, since its normals face inward
+                # and it is therefore front-facing through a cutaway.
                 backface_params=(
                     None
                     if wireframe
@@ -225,13 +233,43 @@ class MeshView(QWidget):
                 smooth_shading=False,
                 specular=0.0,
                 show_edges=False,
+                reset_camera=False,
             )
 
         self.plotter.add_axes()
+
         if reset_camera:
             self.plotter.view_isometric()
             self.plotter.reset_camera()
+        elif camera is not None:
+            self.plotter.camera_position = camera
+
+        self._apply_depth_effects()
         self.plotter.render()
+
+    def _apply_depth_effects(self) -> None:
+        """Screen-space ambient occlusion, so cavities read as cavities.
+
+        Back-face darkening alone cannot reveal the bore: a bore's surface
+        normals point inward toward the axis, so looking into a cutaway you see
+        its *front* faces, not its back faces. SSAO works on geometry instead of
+        orientation -- it darkens anything enclosed by nearby surfaces, which is
+        exactly what a bore, a slot, and a fin root are. It also supplies the
+        subtle surface texture that flat shading lacks.
+        """
+        try:
+            # The occlusion radius is a world-space distance, so it has to
+            # track the model's scale: a value tuned for a 0.1 m grain does
+            # nothing on a 100 mm one.
+            extent = max(
+                self._pv_mesh.bounds[1] - self._pv_mesh.bounds[0],
+                self._pv_mesh.bounds[3] - self._pv_mesh.bounds[2],
+                self._pv_mesh.bounds[5] - self._pv_mesh.bounds[4],
+            )
+            self.plotter.enable_ssao(radius=extent * 0.08, bias=extent * 0.002)
+            self.plotter.enable_anti_aliasing("fxaa")
+        except Exception:
+            pass  # depth cues are cosmetic; never let them break the view
 
     # --- Sectioning -------------------------------------------------------
 
