@@ -56,6 +56,24 @@ CAD_SUFFIXES = {".step", ".stp"}
 
 SUPPORTED_SUFFIXES = MESH_SUFFIXES | CAD_SUFFIXES
 
+# Native formats of specific CAD packages. These are proprietary and
+# undocumented -- there is no open-source reader for any of them, and the only
+# converters are the vendor's own tools or their cloud services. Nothing can be
+# implemented here; the user has to export a neutral format instead. Naming the
+# right menu item beats a generic "unsupported format" message.
+NATIVE_CAD_FORMATS = {
+    ".ipt": "Autodesk Inventor part",
+    ".iam": "Autodesk Inventor assembly",
+    ".sldprt": "SolidWorks part",
+    ".sldasm": "SolidWorks assembly",
+    ".catpart": "CATIA part",
+    ".catproduct": "CATIA assembly",
+    ".prt": "NX / Creo part",
+    ".asm": "Creo assembly",
+    ".f3d": "Fusion 360 design",
+    ".dwg": "AutoCAD drawing",
+}
+
 
 class MeshImportError(RuntimeError):
     """Raised when a file cannot be read as a usable triangle mesh."""
@@ -92,6 +110,19 @@ def load_mesh(path: str | Path):
 
     path = Path(path)
     suffix = path.suffix.lower()
+
+    if suffix in NATIVE_CAD_FORMATS:
+        raise MeshImportError(
+            f"'{path.name}' is a {NATIVE_CAD_FORMATS[suffix]} file. That is a "
+            "proprietary format with no open reader, so it cannot be opened "
+            "directly.\n\n"
+            "Export a neutral format from your CAD package instead:\n"
+            "  * STEP (.step / .stp) - exact geometry, preferred\n"
+            "  * STL (.stl) - already tessellated; set units to metres and "
+            "resolution to high\n\n"
+            "In Inventor this is File > Export > CAD Format."
+        )
+
     if suffix not in SUPPORTED_SUFFIXES:
         supported = ", ".join(sorted(SUPPORTED_SUFFIXES))
         raise MeshImportError(
