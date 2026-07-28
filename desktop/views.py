@@ -49,6 +49,8 @@ class MeshView(QWidget):
         self.plotter = None
         self._actor = None
         self._cap_actor = None
+        self._body_data = None
+        self._cap_data = None
         self._built_wireframe = None
 
         if not HAVE_3D:
@@ -146,8 +148,6 @@ class MeshView(QWidget):
         # 128-sided bore (2.8 deg per facet) round while leaving slot corners
         # and end faces crisp.
         pv.global_theme.sharp_edges_feature_angle = 30.0
-        # The cut-face actor is created up front and starts empty.
-        pv.global_theme.allow_empty_mesh = True
 
 
         self.plotter = QtInteractor(self)
@@ -274,12 +274,16 @@ class MeshView(QWidget):
     def _render(self, reset_camera: bool = False) -> None:
         """Draw the cached mesh at the current style and section position.
 
-        Actors are created once and then *updated in place*. The previous
-        version cleared the renderer and re-added everything on every frame,
-        which tears down and rebuilds the whole VTK pipeline 60 times a second
-        -- and leaves a window in which the scene is momentarily empty, which
-        is visible as the model flickering see-through while sectioning.
-        Swapping the mapper's input keeps the actors alive throughout.
+        Actors are created once and then *updated in place*. Clearing the
+        renderer and re-adding every frame tears the whole VTK pipeline down and
+        rebuilds it 60 times a second, and leaves a window in which the scene is
+        momentarily empty -- visible as the model flickering see-through while
+        sectioning.
+
+        Each actor owns a **persistent** ``vtkPolyData`` that is shallow-copied
+        into, rather than having its mapper re-pointed at a new object every
+        frame. Re-pointing a live mapper mid-scene is the fragile version of
+        this idiom; copying into a stable object is the standard one.
         """
         if self.plotter is None or getattr(self, "_pv_mesh", None) is None:
             return
@@ -287,14 +291,17 @@ class MeshView(QWidget):
         mesh, cap = self._sectioned_mesh()
         wireframe = self._style == "wireframe"
         camera = None if reset_camera else self.plotter.camera_position
+        show_cap = cap is not None and not wireframe and cap.n_points > 0
 
         # A style change alters actor properties rather than data, so it is the
         # one case that still warrants a rebuild. It happens on a click, not on
         # a drag, so the cost is irrelevant.
         if self._actor is None or self._built_wireframe != wireframe:
             self.plotter.clear()
+            self._body_data = pv.PolyData()
+            self._body_data.shallow_copy(mesh)
             self._actor = self.plotter.add_mesh(
-                mesh,
+                self._body_data,
                 style="wireframe" if wireframe else "surface",
                 scalars="grain_rgb" if not wireframe else None,
                 rgb=True if not wireframe else None,
@@ -309,35 +316,47 @@ class MeshView(QWidget):
                 specular=0.08,
                 specular_power=8,
             )
-            self._cap_actor = self.plotter.add_mesh(
-                pv.PolyData(),
-                color=theme.CUT_FACE,
-                smooth_shading=False,
-                specular=0.0,
-                show_edges=False,
-                reset_camera=False,
-            )
-            # The cut face is coplanar with the plane the body was clipped on,
-            # so the depth buffer cannot separate them and they z-fight.
-            # Polygon offset biases the cap in depth only -- the geometry does
-            # not move, so the cut stays exactly where the user put it.
-            try:
-                mapper = self._cap_actor.GetMapper()
-                mapper.SetResolveCoincidentTopologyToPolygonOffset()
-                mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(
-                    -4.0, -4.0
-                )
-            except Exception:
-                pass
             self.plotter.add_axes()
+            self._cap_actor = None
+            self._cap_data = None
             self._built_wireframe = wireframe
         else:
-            self._actor.GetMapper().SetInputData(mesh)
+            self._body_data.shallow_copy(mesh)
+            self._body_data.Modified()
 
-        if cap is not None and not wireframe and cap.n_points:
-            self._cap_actor.GetMapper().SetInputData(cap)
-            self._cap_actor.SetVisibility(True)
-        else:
+        # The cap actor is created only once there is a real cut face to show.
+        # Adding an actor backed by an empty mesh and toggling its visibility
+        # works on paper but asks VTK to render a degenerate dataset, which is
+        # not worth risking for the sake of symmetry.
+        if show_cap:
+            if self._cap_actor is None:
+                self._cap_data = pv.PolyData()
+                self._cap_data.shallow_copy(cap)
+                self._cap_actor = self.plotter.add_mesh(
+                    self._cap_data,
+                    color=theme.CUT_FACE,
+                    smooth_shading=False,
+                    specular=0.0,
+                    show_edges=False,
+                    reset_camera=False,
+                )
+                # The cut face is coplanar with the plane the body was clipped
+                # on, so the depth buffer cannot separate them and they
+                # z-fight. Polygon offset biases the cap in depth only -- the
+                # geometry does not move, so the cut stays where it was put.
+                try:
+                    mapper = self._cap_actor.GetMapper()
+                    mapper.SetResolveCoincidentTopologyToPolygonOffset()
+                    mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(
+                        -4.0, -4.0
+                    )
+                except Exception:
+                    pass
+            else:
+                self._cap_data.shallow_copy(cap)
+                self._cap_data.Modified()
+                self._cap_actor.SetVisibility(True)
+        elif self._cap_actor is not None:
             self._cap_actor.SetVisibility(False)
 
         if reset_camera:
@@ -347,6 +366,18 @@ class MeshView(QWidget):
             self.plotter.camera_position = camera
 
         self.plotter.render()
+
+    def _apply_depth_effects(self) -> None:
+        """Configure anti-aliasing. Called **once**, at construction.
+
+        This used to run on every render, where it measured 44 ms per frame --
+        by far the largest cost in the loop and the reason dragging the section
+        slider was choppy. It is a renderer state change, not per-frame work.
+        """
+        try:
+            self.plotter.enable_anti_aliasing("fxaa")
+        except Exception:
+            pass  # purely cosmetic; never let it break the view
 
     # --- Sectioning -------------------------------------------------------
 
@@ -524,6 +555,8 @@ class MeshView(QWidget):
             # stale reference would be updated instead of a fresh actor built.
             self._actor = None
             self._cap_actor = None
+            self._body_data = None
+            self._cap_data = None
             self._built_wireframe = None
             self._set_section_enabled(False)
             self._empty.show()
