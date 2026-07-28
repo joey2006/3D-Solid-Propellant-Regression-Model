@@ -72,11 +72,24 @@ def grain_measurements(mesh, density: float | None = None) -> dict:
     outer = alignment > RADIAL_THRESHOLD
     inner = alignment < -RADIAL_THRESHOLD
 
+    # Faces are classified by their normals, but radii are measured at their
+    # *vertices*, not their centroids. A tessellated circle is an inscribed
+    # polygon: its vertices lie exactly on the true circle while every face
+    # centroid sits inside it, short by a factor of cos(pi/N). Measuring at
+    # centroids therefore under-reports every diameter -- a 128-sided 50 mm
+    # bore reads 49.9866 mm. Measuring at vertices returns 50.0000 mm, so a
+    # part modelled as 1.000 in reads as 1.000 in rather than 0.9996 in.
+    #
     # The extremes rather than the means: the outer wall is the furthest
-    # material from the axis, and the bore is the closest. A mean would be
-    # dragged around by slot walls sitting between the two.
-    outer_radius = float(radius[outer].max()) if outer.any() else None
-    bore_radius = float(radius[inner].min()) if inner.any() else None
+    # material from the axis and the bore the closest. A mean would be dragged
+    # around by slot walls sitting between the two.
+    vertex_radius = np.linalg.norm(vertices[:, :2] - axis_centre[:2], axis=1)
+    outer_radius = (
+        float(vertex_radius[np.unique(faces[outer])].max()) if outer.any() else None
+    )
+    bore_radius = (
+        float(vertex_radius[np.unique(faces[inner])].min()) if inner.any() else None
+    )
 
     web = (
         outer_radius - bore_radius

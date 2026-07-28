@@ -450,7 +450,7 @@ class MeasurementsPanel(QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        self._units = "mm"
+        self._units = "in"
         self._data: dict | None = None
 
         unit_row = QWidget()
@@ -470,7 +470,9 @@ class MeasurementsPanel(QWidget):
             button.clicked.connect(lambda _=False, c=code: self.set_units(c))
             unit_layout.addWidget(button)
             self._unit_buttons[code] = button
-        self._unit_buttons["mm"].setChecked(True)
+        # Imperial by default: experimental motor work is dimensioned in
+        # inches, and it is the units most parts arrive in.
+        self._unit_buttons["in"].setChecked(True)
         layout.addWidget(unit_row)
 
         self._rows: dict[str, QLabel] = {}
@@ -550,7 +552,9 @@ class MeasurementsPanel(QWidget):
             if x is None:
                 return "--"
             if imperial:
-                return f"{x / self._M_PER_INCH:.4f} in"
+                # 3 dp is 0.001 in = 25 um, finer than any real
+                # tolerance, and avoids showing faceting noise.
+                return f"{x / self._M_PER_INCH:.3f} in"
             return f"{x * 1000:.2f} mm"
 
         for key in ("length", "outer_diameter", "bore_diameter", "web_thickness"):

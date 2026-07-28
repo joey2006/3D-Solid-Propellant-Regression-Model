@@ -145,6 +145,9 @@ class MeshView(QWidget):
         layout.addWidget(divider())
 
         self._section_invert = True
+        # Display units for the cut readout, kept in step with the
+        # Measurements panel so the whole app never mixes units.
+        self._units = "in"
         self._set_section_enabled(False)
 
         # Facets meeting at less than this angle are treated as one smooth
@@ -319,6 +322,14 @@ class MeshView(QWidget):
                 split_sharp_edges=False,
                 specular=0.08,
                 specular_power=8,
+                # A surface seen from behind is otherwise shaded as if lit from
+                # the far side -- nearly black, which against the dark
+                # background looks like a hole rather than a surface. Giving
+                # back faces an explicit tone means the model can never appear
+                # see-through, whatever the source mesh's winding.
+                backface_params=(
+                    None if wireframe else {"color": theme.INTERIOR}
+                ),
             )
             self.plotter.add_axes()
             self._cap_actor = None
@@ -492,9 +503,12 @@ class MeshView(QWidget):
         bounds = self._pv_mesh.bounds
         span = bounds[2 * axis + 1] - bounds[2 * axis]
         amount = self.section_slider.value() / 1000.0
-        self.section_readout.setText(
-            f"{amount * span * 1000:.1f} mm  ({amount:.0%})"
-        )
+        depth = amount * span
+        if self._units == "in":
+            shown = f"{depth / 0.0254:.3f} in"
+        else:
+            shown = f"{depth * 1000:.1f} mm"
+        self.section_readout.setText(f"{shown}  ({amount:.0%})")
 
     def _on_section_toggled(self, checked: bool) -> None:
         for widget in (self.section_axis, self.section_slider, self.section_flip):
@@ -528,6 +542,13 @@ class MeshView(QWidget):
         self.wireframe_button.setChecked(style == "wireframe")
         if getattr(self, "_pv_mesh", None) is not None:
             self._render()
+
+    def set_units(self, units: str) -> None:
+        """Switch the cut readout between ``"mm"`` and ``"in"``."""
+        if units in ("mm", "in") and units != getattr(self, "_units", None):
+            self._units = units
+            if self.plotter is not None:
+                self._update_section_readout()
 
     def reset_camera(self) -> None:
         """Return the view to exactly how a mesh looks when first opened.

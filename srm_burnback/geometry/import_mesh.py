@@ -273,6 +273,9 @@ def mesh_stats(mesh) -> dict:
 
     return {
         "n_triangles": int(len(mesh.faces)),
+        # Inconsistent winding means some faces are inside-out, which both
+        # mis-shades them and breaks any inside/outside test based on normals.
+        "winding_consistent": bool(mesh.is_winding_consistent),
         "n_vertices": int(len(mesh.vertices)),
         "watertight": watertight,
         "n_degenerate": n_degenerate,

@@ -101,12 +101,10 @@ class MainWindow(QMainWindow):
         # Mass is volume x density, so it has to follow the propellant panel.
         self.propellant_panel.changed.connect(self._refresh_measurements)
         # Remember the unit choice; it is a preference, not per-file state.
-        self.measurements_panel.units_changed.connect(
-            lambda u: self._settings.setValue('units', u)
-        )
-        self.measurements_panel.set_units(
-            str(self._settings.value('units', 'mm')), notify=False
-        )
+        self.measurements_panel.units_changed.connect(self._on_units_changed)
+        units = str(self._settings.value("units", "in"))
+        self.measurements_panel.set_units(units, notify=False)
+        self.mesh_view.set_units(units)
 
         self._docks: dict[str, QDockWidget] = {}
         self._add_dock("Geometry", self.geometry_panel, Qt.LeftDockWidgetArea)
@@ -345,6 +343,12 @@ class MainWindow(QMainWindow):
                 "contribute no solid angle and are skipped, but a large count "
                 "suggests a damaged mesh."
             )
+        if not stats.get("winding_consistent", True):
+            messages.append(
+                "Some faces are wound inside-out. They have been repaired on "
+                "import, since inconsistent winding both mis-shades the "
+                "surface and breaks the inside/outside classification."
+            )
         if stats["max_extent"] > 10.0:
             messages.append(
                 "Largest extent exceeds 10. If this grain is in millimetres, "
@@ -361,6 +365,11 @@ class MainWindow(QMainWindow):
                 "for metres.",
                 "ok",
             )
+
+    def _on_units_changed(self, units: str) -> None:
+        """One unit choice drives the whole window, not just one panel."""
+        self._settings.setValue("units", units)
+        self.mesh_view.set_units(units)
 
     def _refresh_measurements(self) -> None:
         """Recompute grain dimensions for the current mesh and density."""

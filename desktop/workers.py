@@ -43,6 +43,16 @@ class MeshLoadWorker(QObject):
             self.progress.emit(f"Reading {self._path.name}...")
             mesh = load_mesh(self._path)
 
+            # CAD tessellators do not guarantee consistent face winding, and a
+            # face whose normal points the wrong way shades as if lit from
+            # behind -- almost black, which against a dark background reads as
+            # a hole in the model. It also breaks the inside/outside surface
+            # classification, since that is decided from normal direction.
+            # Cheap to repair (~1 ms) and a no-op when already correct.
+            if not mesh.is_winding_consistent:
+                self.progress.emit("Repairing face orientation...")
+                mesh.fix_normals()
+
             # CAD packages disagree on the up axis -- Inventor and SolidWorks
             # commonly export Y-up. Everything downstream treats Z as the grain
             # axis, erosive burning most of all, so square it away at import.
