@@ -425,13 +425,24 @@ class SimulationPanel(QWidget):
 
 
 class MeasurementsPanel(QWidget):
-    """Engineering dimensions of the loaded grain.
+    """Engineering dimensions of the loaded grain, in the user's units.
 
-    Deliberately in millimetres and grams rather than the metres and kilograms
-    the engine works in: a 40 mm web is legible, 0.0399893 m is not. The
-    conversion happens here, at the very edge, so nothing upstream has to care
-    about display units.
+    The engine works in metres and kilograms throughout. Conversion happens
+    here, at the very edge, so nothing upstream ever has to know which units
+    are on display -- and a unit bug can only ever be a display bug.
+
+    Imperial is a first-class option rather than a nicety: amateur and
+    experimental motor work is largely dimensioned in inches, and reading a
+    0.2 in bore as "5.07 mm" makes an exact design number look like a
+    measurement error. (Part of #154.)
     """
+
+    #: Emitted when the user switches units, so the choice can be persisted.
+    units_changed = Signal(str)
+
+    # Exact by definition: the international inch is 25.4 mm.
+    _M_PER_INCH = 0.0254
+    _LB_PER_KG = 2.2046226218
 
     def __init__(self):
         super().__init__()
@@ -439,23 +450,49 @@ class MeasurementsPanel(QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
+        self._units = "mm"
+        self._data: dict | None = None
+
+        unit_row = QWidget()
+        unit_layout = QHBoxLayout(unit_row)
+        unit_layout.setContentsMargins(0, 0, 0, 0)
+        unit_layout.setSpacing(6)
+        label = QLabel("Units")
+        label.setStyleSheet(f"color:{theme.TEXT_MUTED}; font-size:12px;")
+        unit_layout.addWidget(label)
+        unit_layout.addStretch(1)
+
+        self._unit_buttons = {}
+        for code, text in (("mm", "mm"), ("in", "inch")):
+            button = QPushButton(text)
+            button.setCheckable(True)
+            button.setFixedWidth(56)
+            button.clicked.connect(lambda _=False, c=code: self.set_units(c))
+            unit_layout.addWidget(button)
+            self._unit_buttons[code] = button
+        self._unit_buttons["mm"].setChecked(True)
+        layout.addWidget(unit_row)
+
         self._rows: dict[str, QLabel] = {}
-        for key, label, tip in (
+        for key, text, tip in (
             ("length", "Length", "Extent along the grain axis."),
             ("outer_diameter", "Outer dia.", "Across the outer wall."),
-            ("bore_diameter", "Bore dia.", "Across the narrowest inward-facing surface."),
-            ("web_thickness", "Web", "Propellant between bore and outer wall — "
-                                     "what has to burn through."),
+            ("bore_diameter", "Bore dia.",
+             "Across the narrowest inward-facing surface."),
+            ("web_thickness", "Web",
+             "Propellant between bore and outer wall - what has to burn through."),
             ("length_to_diameter", "L/D", "Length over outer diameter."),
             ("volume", "Volume", "Propellant volume. Needs a closed surface."),
-            ("mass", "Mass", "Volume times the density set in the Propellant panel."),
-            ("port_fraction", "Port fraction", "Share of the envelope that is void. "
-                                               "A near-zero value means no bore was found."),
+            ("mass", "Mass",
+             "Volume times the density set in the Propellant panel."),
+            ("port_fraction", "Port fraction",
+             "Share of the envelope that is void. A near-zero value means no "
+             "bore was found."),
         ):
             row = QWidget()
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
-            name = QLabel(label)
+            name = QLabel(text)
             name.setStyleSheet(f"color:{theme.TEXT_MUTED}; font-size:12px;")
             value = QLabel("--")
             value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -471,40 +508,75 @@ class MeasurementsPanel(QWidget):
 
         layout.addWidget(
             hint(
-                "Measured from the imported geometry, not entered by hand — "
-                "an uploaded object arrives as triangles with no parameters "
+                "Measured from the imported geometry, not entered by hand - an "
+                "uploaded object arrives as triangles with no parameters "
                 "attached, so the bore and web are recovered from the surface "
-                "normals."
+                "normals. Values read a hair under the true size because a "
+                "tessellated circle sits inside the real one."
             )
         )
         layout.addStretch(1)
 
+    # -- Units -------------------------------------------------------------
+
+    def units(self) -> str:
+        return self._units
+
+    def set_units(self, units: str, notify: bool = True) -> None:
+        """Switch between ``"mm"`` and ``"in"`` and redraw the current values."""
+        if units not in ("mm", "in"):
+            return
+        self._units = units
+        for code, button in self._unit_buttons.items():
+            button.setChecked(code == units)
+        if self._data is not None:
+            self.set_measurements(self._data)
+        if notify:
+            self.units_changed.emit(units)
+
+    # -- Values ------------------------------------------------------------
+
     def clear(self) -> None:
+        self._data = None
         for value in self._rows.values():
             value.setText("--")
 
     def set_measurements(self, data: dict) -> None:
-        """Render a :func:`grain_measurements` result."""
+        """Render a :func:`grain_measurements` result in the current units."""
+        self._data = data
+        imperial = self._units == "in"
 
-        def mm(x):
-            return "--" if x is None else f"{x * 1000:.2f} mm"
+        def length(x):
+            if x is None:
+                return "--"
+            if imperial:
+                return f"{x / self._M_PER_INCH:.4f} in"
+            return f"{x * 1000:.2f} mm"
 
-        self._rows["length"].setText(mm(data["length"]))
-        self._rows["outer_diameter"].setText(mm(data["outer_diameter"]))
-        self._rows["bore_diameter"].setText(mm(data["bore_diameter"]))
-        self._rows["web_thickness"].setText(mm(data["web_thickness"]))
+        for key in ("length", "outer_diameter", "bore_diameter", "web_thickness"):
+            self._rows[key].setText(length(data[key]))
 
         ld = data["length_to_diameter"]
         self._rows["length_to_diameter"].setText("--" if ld is None else f"{ld:.2f}")
 
         volume = data["volume"]
-        self._rows["volume"].setText(
-            "--" if volume is None else f"{volume * 1e6:.1f} cm³"
-        )
+        if volume is None:
+            self._rows["volume"].setText("--")
+        elif imperial:
+            self._rows["volume"].setText(
+                f"{volume / self._M_PER_INCH ** 3:.3f} in³"
+            )
+        else:
+            self._rows["volume"].setText(f"{volume * 1e6:.1f} cm³")
 
         mass = data["mass"]
         if mass is None:
             self._rows["mass"].setText("--")
+        elif imperial:
+            pounds = mass * self._LB_PER_KG
+            self._rows["mass"].setText(
+                f"{pounds * 16:.1f} oz" if pounds < 1.0 else f"{pounds:.3f} lb"
+            )
         elif mass < 1.0:
             self._rows["mass"].setText(f"{mass * 1000:.0f} g")
         else:

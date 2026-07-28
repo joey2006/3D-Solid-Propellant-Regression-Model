@@ -100,6 +100,13 @@ class MainWindow(QMainWindow):
         self.geometry_panel.changed.connect(self._refresh_grid_metrics)
         # Mass is volume x density, so it has to follow the propellant panel.
         self.propellant_panel.changed.connect(self._refresh_measurements)
+        # Remember the unit choice; it is a preference, not per-file state.
+        self.measurements_panel.units_changed.connect(
+            lambda u: self._settings.setValue('units', u)
+        )
+        self.measurements_panel.set_units(
+            str(self._settings.value('units', 'mm')), notify=False
+        )
 
         self._docks: dict[str, QDockWidget] = {}
         self._add_dock("Geometry", self.geometry_panel, Qt.LeftDockWidgetArea)
