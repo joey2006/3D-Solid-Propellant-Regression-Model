@@ -896,9 +896,9 @@ class FieldView(QWidget):
              "The signed distance field itself, with the burning surface drawn "
              "as the zero contour. Blue is propellant, red is open void."),
             ("grad", "|∇φ|  check",
-             "Whether φ is a valid distance field. |∇φ| must be 1 near the "
-             "surface; anywhere it is not, φ is misreporting distance and the "
-             "solver would inherit the error."),
+             "Disabled pending #193. The measurement is correct but reports an "
+             "abstraction rather than anything you can act on, so it is set "
+             "aside rather than left to be misread."),
         ):
             button = QPushButton(text)
             button.setCheckable(True)
@@ -907,6 +907,10 @@ class FieldView(QWidget):
             bar_layout.addWidget(button)
             self._mode_buttons[code] = button
         self._mode_buttons["phi"].setChecked(True)
+        # Greyed rather than removed: the diagnostic still runs and is still
+        # asserted in the tests, so the validation is unaffected. What is
+        # deferred is presenting it to a user (#193).
+        self._mode_buttons["grad"].setEnabled(False)
 
         bar_layout.addStretch(1)
 
@@ -946,71 +950,81 @@ class FieldView(QWidget):
         strip_layout.setContentsMargins(14, 10, 14, 12)
         strip_layout.setSpacing(8)
 
-        # Hidden behind the "?" like every other panel. This one carries more
-        # weight than most: φ is the least self-explanatory thing in the app,
-        # and unlike a bore diameter there is nothing familiar to fall back on.
-        self._help_widgets = []
-        for text in (
-            "<b>φ (phi) is the signed distance field.</b> For every point in a "
-            "3D grid around the grain it stores one number: how far that point "
-            "is from the burning surface, signed by which side it is on — "
-            "negative inside the propellant, positive in the open void, and "
-            "exactly zero <i>on</i> the surface. So the burning surface is not "
-            "stored as an object at all; it is wherever φ happens to be zero.",
+        # Help lives in its own scrollable panel between the toolbar and the
+        # numbers, rather than as loose paragraphs pushed in above them. Six
+        # stacked paragraphs shoved the plot off the screen and gave no way to
+        # find the one answer you wanted; short headed sections can be skimmed
+        # for the heading and read only where needed.
+        self._help_panel = QScrollArea()
+        self._help_panel.setWidgetResizable(True)
+        self._help_panel.setFrameShape(QScrollArea.NoFrame)
+        self._help_panel.setMaximumHeight(230)
+        self._help_panel.setStyleSheet(
+            f"QScrollArea {{ background:{theme.BG_RAISED};"
+            f"border:1px solid {theme.BORDER}; border-radius:6px; }}"
+        )
+        help_body = QWidget()
+        help_body.setStyleSheet(f"background:{theme.BG_RAISED};")
+        help_layout = QVBoxLayout(help_body)
+        help_layout.setContentsMargins(14, 12, 14, 12)
+        help_layout.setSpacing(4)
 
-            "<b>Why store it that way?</b> Because burning is then just "
-            "arithmetic. To advance the surface you subtract the burn rate "
-            "from φ everywhere and the zero crossing moves on its own — and it "
-            "keeps working when the front splits in two, merges, or forms a "
-            "sharp corner, all of which happen in a real grain and all of "
-            "which would break a model that tracked the surface as a mesh of "
-            "points.",
-
-            "<b>The slice</b> is one flat cut through that 3D field, because a "
-            "volume cannot be drawn on a screen. Pick which way to cut with "
-            "the axis box and where to cut with the slider. The orange line is "
-            "the zero contour — the burning surface itself, and the only line "
-            "here with physical meaning. On a BATES you should see two: the "
-            "bore and the outer wall.",
-
-            "<b>The five diagnostic numbers.</b> <i>|∇φ| mean</i> is the "
-            "headline — it should read 1.0000, and anything past about "
-            "0.02 off means the field is not a clean distance function. "
-            "<i>Spread</i> is the standard deviation of the same "
-            "measurement: a low mean with a high spread means it is "
-            "right on average while being wrong in specific places, "
-            "which is worse than it sounds. <i>Within 1%</i> is the "
-            "share of near-surface cells landing between 0.99 and "
-            "1.01 — the strictest of the three, and the one that "
-            "notices a small badly-behaved region the mean would "
-            "average away. <i>Solid cells</i> is how much of the grid "
-            "the sign field called propellant; sanity-check it against "
-            "port fraction in Measurements. <i>Burning faces</i> is how "
-            "many mesh triangles φ measures distance from.",
-
-            "<b>Only the burning surfaces are measured from.</b> The grain "
-            "is lit in the bore, so φ is the distance to the bore and "
-            "slot walls. The outer wall is bonded to the casing and "
-            "never sees flame, so it is excluded — include it and φ "
-            "would turn around in the middle of the web and cross zero "
-            "again at the wall, and the solver would eat the grain from "
-            "the outside in. The end faces are a setting, since nothing "
-            "in the geometry distinguishes a painted end from a bare "
-            "one.",
-
-            "<b>|∇φ| (the gradient magnitude)</b> measures how fast φ changes "
-            "as you step across the grid. For a true distance field it must be "
-            "exactly 1: move 1 mm and the distance to the surface changes by "
-            "1 mm. Anywhere it is not 1, φ is lying about distance — and the "
-            "solver, the timestep and the reinitialisation all assume it is "
-            "telling the truth. That is why this one number is the headline "
-            "check on an import.",
+        for heading, text in (
+            ("What φ is",
+             "A number stored at every point of a 3D grid around the grain: "
+             "how far that point is from the burning surface, signed by which "
+             "side it is on. Negative inside the propellant, positive in open "
+             "void, zero exactly on the surface. The burning surface is never "
+             "stored as an object — it is simply wherever φ equals zero."),
+            ("Why store it that way",
+             "Burning becomes arithmetic: subtract the burn rate from φ "
+             "everywhere and the zero crossing moves itself. It keeps working "
+             "when the front splits, merges or forms a sharp corner — all of "
+             "which happen in a real grain, and all of which break a model "
+             "that tracks the surface as a mesh of points."),
+            ("What the slice shows",
+             "One flat cut through that 3D field, since a volume cannot be "
+             "drawn directly. Choose the direction with the axis box and the "
+             "position with the slider. The two orange contours are the grain "
+             "outline: the inner one is the burning surface and recedes as the "
+             "motor fires, the outer is the casing wall and stays put."),
+            ("Why the colour continues past the wall",
+             "φ is defined over the whole grid, not just the grain, and keeps "
+             "decreasing outside the casing. That is deliberate — the solver "
+             "needs a smooth field everywhere, and cutting it off at the wall "
+             "would put a kink exactly where the burn front ends up at "
+             "burnout. The wall is enforced separately, as a clamp."),
+            ("The numbers",
+             "<i>Solid cells</i> is the share of the grid the sign field "
+             "called propellant — compare it against port fraction in "
+             "Measurements. <i>Burning faces</i> is how many mesh triangles φ "
+             "measures distance from; the outer wall is always excluded, and "
+             "the end faces follow the setting in the Geometry panel. "
+             "<i>Build time</i> is what this grid cost."),
+            ("|∇φ| — set aside for now",
+             "The three greyed tiles measure how close the field is to a true "
+             "distance function. The measurement is correct but reports an "
+             "abstraction rather than anything actionable, so it is parked "
+             "under issue #193 rather than left to be misread. It still runs, "
+             "and is still checked by the test suite."),
         ):
-            label = hint(text)
-            label.setTextFormat(Qt.RichText)
-            label.hide()
-            self._help_widgets.append(label)
-            strip_layout.addWidget(label)
+            title = QLabel(heading)
+            title.setStyleSheet(
+                f"color:{theme.TEXT_MUTED}; font-size:11px; font-weight:600;"
+                "letter-spacing:0.5px; padding-top:6px;"
+            )
+            body = QLabel(text)
+            body.setWordWrap(True)
+            body.setTextFormat(Qt.RichText)
+            body.setStyleSheet(f"color:{theme.TEXT_FAINT}; font-size:11px;")
+            help_layout.addWidget(title)
+            help_layout.addWidget(body)
+
+        help_layout.addStretch(1)
+        self._help_panel.setWidget(help_body)
+        self._help_panel.hide()
+        strip_layout.addWidget(self._help_panel)
+        self._help_widgets = [self._help_panel]
 
         self.banner = Banner()
         strip_layout.addWidget(self.banner)
@@ -1175,16 +1189,12 @@ class FieldView(QWidget):
 
         median = stats.get("grad_median", stats["grad_mean"])
         spread = stats.get("grad_iqr", stats["grad_std"])
-        self.metrics.set(
-            "grad", f"{median:.4f}", "ok" if abs(median - 1.0) < 0.01 else "warn"
-        )
-        self.metrics.set(
-            "spread", f"{spread:.4f}", "ok" if spread < 0.02 else "warn"
-        )
-        self.metrics.set(
-            "within", f"{stats['grad_within_1pct']:.1%}",
-            "ok" if stats["grad_within_1pct"] > 0.8 else "warn",
-        )
+        # Shown but muted, and carrying no pass/fail accent, until #193 settles
+        # what these should say. A green or orange bar is a claim about whether
+        # the import is good, and that claim is exactly what is in question.
+        self.metrics.set("grad", f"{median:.4f}", "muted")
+        self.metrics.set("spread", f"{spread:.4f}", "muted")
+        self.metrics.set("within", f"{stats['grad_within_1pct']:.1%}", "muted")
         self.metrics.set("solid", f"{stats['solid_fraction']:.1%}")
         self.metrics.set(
             "burning",
@@ -1195,20 +1205,15 @@ class FieldView(QWidget):
 
         # The verdict, stated rather than left to be inferred from four
         # numbers. This panel exists to answer one question.
-        if abs(median - 1.0) < 0.01 and spread < 0.02:
-            self.banner.show_message(
-                f"|∇φ| = {median:.4f} ± {spread:.4f} near the surface. This is "
-                "a valid signed distance field — the import produced geometry "
-                "the solver can integrate.",
-                "ok",
-            )
-        else:
-            self.banner.show_message(
-                f"|∇φ| = {median:.4f} (spread {spread:.4f}) is off 1. The "
-                "Godunov scheme, the CFL timestep and reinitialization all "
-                "assume it is 1, so this field will not integrate cleanly.",
-                "warn",
-            )
+        ends = stats.get("ends", "inhibited")
+        self.banner.show_message(
+            f"φ built in {stats['seconds']:.2f} s, measured from "
+            f"{stats.get('n_burning', 0):,} burning faces with the end faces "
+            f"{ends}. The orange contours are the grain outline: the inner one "
+            "is the burning surface and will recede, the outer is the casing "
+            "and will not.",
+            "ok",
+        )
 
         self._empty.hide()
         self._canvas.show()

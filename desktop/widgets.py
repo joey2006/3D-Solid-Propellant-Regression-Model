@@ -62,6 +62,10 @@ class MetricTile(QFrame):
             "ok": theme.OK,
             "warn": theme.WARN,
             "error": theme.ERROR,
+            # Shown but not to be acted on -- a number whose interpretation is
+            # still an open question reads as noise unless it is visibly
+            # set aside.
+            "muted": theme.BORDER,
         }[self._status]
         self.setStyleSheet(
             f"MetricTile {{ background:{theme.BG_RAISED};"
@@ -79,6 +83,7 @@ class MetricTile(QFrame):
             "ok": theme.TEXT,
             "warn": theme.WARN,
             "error": theme.ERROR,
+            "muted": theme.TEXT_FAINT,
         }[status]
         self._value.setStyleSheet(
             f"color:{text_colour}; font-size:19px; font-weight:600;"
