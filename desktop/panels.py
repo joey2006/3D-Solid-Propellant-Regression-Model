@@ -170,9 +170,16 @@ class GeometryPanel(QWidget):
 
         self.ends = QComboBox()
         self.ends.addItems(["Inhibited", "Burning"])
+        # Burning ends are shelved pending #194: the casing field is
+        # ill-defined when the inhibited faces no longer enclose the grain, and
+        # the burn never terminates. Shown rather than removed so the option is
+        # visibly deferred instead of silently absent.
+        self.ends.model().item(1).setEnabled(False)
+        self.ends.setEnabled(False)
         self.ends.setToolTip(
-            "Whether the flat end faces of the grain burn, or are painted with "
-            "inhibitor. Nothing in the geometry can tell these apart."
+            "Whether the flat end faces burn or are painted with inhibitor. "
+            "Fixed at Inhibited for now — burning ends are deferred under "
+            "issue #194."
         )
         self.ends.currentIndexChanged.connect(self.changed)
         surface_layout.addWidget(FieldRow("End faces", self.ends))
