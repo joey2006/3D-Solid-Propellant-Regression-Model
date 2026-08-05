@@ -23,11 +23,21 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme
+from srm_burnback.units import (
+    format_value,
+    from_si,
+    to_si,
+    units_for,
+)
+
 from .widgets import FieldRow, HelpGroup
 
 # Powers-of-two-ish resolutions. The winding number is O(cells x triangles), so
 # cost scales with the cube of this -- a free-form spin box invites a user to
 # type 500 and wait an hour.
+#: Density units are the one place a raw unit string reaches a widget.
+_PRETTY_DENSITY = {"kg/m3": "kg/m³", "g/cm3": "g/cm³", "lb/in3": "lb/in³"}
+
 RESOLUTIONS = [32, 48, 64, 96, 128, 192, 256]
 
 
@@ -313,6 +323,7 @@ class PropellantPanel(QWidget):
 
     def __init__(self):
         super().__init__()
+        self._units = "imperial"
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
@@ -355,14 +366,15 @@ class PropellantPanel(QWidget):
             )
         )
 
+        # Shown in the current system but stored in SI: `density_value()`
+        # always returns kg/m^3 whatever the box says, so nothing downstream
+        # has to know which system is on display.
+        self._density_si = 1750.0
         self.density = QDoubleSpinBox()
-        self.density.setRange(100.0, 3000.0)
         self.density.setDecimals(1)
-        self.density.setSingleStep(10.0)
-        self.density.setValue(1750.0)
-        self.density.setSuffix("  kg/m³")
-        self.density.valueChanged.connect(self.changed)
+        self.density.valueChanged.connect(self._on_density_changed)
         vieille_layout.addWidget(FieldRow("Density ρ", self.density))
+        self._apply_density_units()
         vieille_layout.addWidget(
             vieille_box.add_help(
                 "Propellant density, used to turn the measured grain volume "
@@ -414,6 +426,51 @@ class PropellantPanel(QWidget):
 
         layout.addWidget(erosive_box)
         layout.addStretch(1)
+
+    # -- Units (#154) ------------------------------------------------------
+
+    def set_units(self, units: str) -> None:
+        """Follow the app-wide unit system."""
+        if units not in ("metric", "imperial") or units == self._units:
+            return
+        self._units = units
+        self._apply_density_units()
+
+    def _apply_density_units(self) -> None:
+        """Re-label and rescale the density box for the current system.
+
+        Signals are blocked while the displayed number changes, because this is
+        the *same* density expressed differently -- emitting `changed` here
+        would look to everything downstream like the user had edited it.
+        """
+        unit = units_for("density", self._units)
+        shown = from_si(self._density_si, "density", unit)
+
+        self.density.blockSignals(True)
+        # lb/in^3 puts a propellant at ~0.063, so the metric step and decimals
+        # would quantise it to nothing.
+        if unit == "lb/in3":
+            self.density.setDecimals(4)
+            self.density.setSingleStep(0.001)
+        else:
+            self.density.setDecimals(1)
+            self.density.setSingleStep(10.0)
+        self.density.setRange(
+            from_si(100.0, "density", unit), from_si(3000.0, "density", unit)
+        )
+        self.density.setValue(shown)
+        self.density.setSuffix(f"  {_PRETTY_DENSITY.get(unit, unit)}")
+        self.density.blockSignals(False)
+
+    def _on_density_changed(self, shown: float) -> None:
+        self._density_si = to_si(
+            shown, "density", units_for("density", self._units)
+        )
+        self.changed.emit()
+
+    def density_value(self) -> float:
+        """Propellant density in kg/m^3, whatever the display system is."""
+        return self._density_si
 
 
 class SimulationPanel(QWidget):
@@ -515,17 +572,13 @@ class MeasurementsPanel(QWidget):
     #: Emitted when the user switches units, so the choice can be persisted.
     units_changed = Signal(str)
 
-    # Exact by definition: the international inch is 25.4 mm.
-    _M_PER_INCH = 0.0254
-    _LB_PER_KG = 2.2046226218
-
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        self._units = "in"
+        self._units = "imperial"
         self._data: dict | None = None
 
         box = HelpGroup("Grain dimensions")
@@ -543,22 +596,25 @@ class MeasurementsPanel(QWidget):
         unit_layout.addStretch(1)
 
         self._unit_buttons = {}
-        for code, text in (("mm", "mm"), ("in", "inch")):
+        for code, text in (("metric", "Metric"), ("imperial", "Imperial")):
             button = QPushButton(text)
             button.setCheckable(True)
-            button.setFixedWidth(56)
+            button.setFixedWidth(72)
             button.clicked.connect(lambda _=False, c=code: self.set_units(c))
             unit_layout.addWidget(button)
             self._unit_buttons[code] = button
         # Imperial by default: experimental motor work is dimensioned in
         # inches, and it is the units most parts arrive in.
-        self._unit_buttons["in"].setChecked(True)
+        self._unit_buttons["imperial"].setChecked(True)
         box_layout.addWidget(unit_row)
         box_layout.addWidget(
             box.add_help(
-                "Which units these are shown in. The engine works in metres "
-                "throughout and converts only here, at the very edge, so a "
-                "unit mistake can only ever be a display mistake."
+                "Which system every number in the app is shown in — lengths, "
+                "pressure, thrust, mass, density and burn rate together, not "
+                "just the dimensions here. The engine works in SI throughout "
+                "and converts only at the display edge, so a unit mistake can "
+                "only ever be a display mistake, and switching systems can "
+                "never change a result."
             )
         )
 
@@ -629,8 +685,8 @@ class MeasurementsPanel(QWidget):
         return self._units
 
     def set_units(self, units: str, notify: bool = True) -> None:
-        """Switch between ``"mm"`` and ``"in"`` and redraw the current values."""
-        if units not in ("mm", "in"):
+        """Switch between ``"metric"`` and ``"imperial"`` and redraw."""
+        if units not in ("metric", "imperial"):
             return
         self._units = units
         for code, button in self._unit_buttons.items():
@@ -648,47 +704,28 @@ class MeasurementsPanel(QWidget):
             value.setText("--")
 
     def set_measurements(self, data: dict) -> None:
-        """Render a :func:`grain_measurements` result in the current units."""
-        self._data = data
-        imperial = self._units == "in"
+        """Render a :func:`grain_measurements` result in the current system.
 
-        def length(x):
-            if x is None:
-                return "--"
-            if imperial:
-                # 3 dp is 0.001 in = 25 um, finer than any real
-                # tolerance, and avoids showing faceting noise.
-                return f"{x / self._M_PER_INCH:.3f} in"
-            return f"{x * 1000:.2f} mm"
+        Every conversion goes through :mod:`srm_burnback.units` rather than a
+        local factor. Three separate copies of 0.0254 used to live in this
+        file, the 3D view and the field view, which is three chances to get one
+        wrong in a way that looks plausible.
+        """
+        self._data = data
+        system = self._units
 
         for key in ("length", "outer_diameter", "bore_diameter", "web_thickness"):
-            self._rows[key].setText(length(data[key]))
-
-        ld = data["length_to_diameter"]
-        self._rows["length_to_diameter"].setText("--" if ld is None else f"{ld:.2f}")
-
-        volume = data["volume"]
-        if volume is None:
-            self._rows["volume"].setText("--")
-        elif imperial:
-            self._rows["volume"].setText(
-                f"{volume / self._M_PER_INCH ** 3:.3f} in³"
+            self._rows[key].setText(
+                format_value(data[key], "length", system)
             )
-        else:
-            self._rows["volume"].setText(f"{volume * 1e6:.1f} cm³")
 
-        mass = data["mass"]
-        if mass is None:
-            self._rows["mass"].setText("--")
-        elif imperial:
-            pounds = mass * self._LB_PER_KG
-            self._rows["mass"].setText(
-                f"{pounds * 16:.1f} oz" if pounds < 1.0 else f"{pounds:.3f} lb"
-            )
-        elif mass < 1.0:
-            self._rows["mass"].setText(f"{mass * 1000:.0f} g")
-        else:
-            self._rows["mass"].setText(f"{mass:.3f} kg")
+        self._rows["volume"].setText(format_value(data["volume"], "volume", system))
+        self._rows["mass"].setText(format_value(data["mass"], "mass", system))
 
+        # Dimensionless, so no unit and no conversion.
+        ratio = data["length_to_diameter"]
+        self._rows["length_to_diameter"].setText(
+            "--" if ratio is None else f"{ratio:.2f}"
+        )
         port = data["port_fraction"]
         self._rows["port_fraction"].setText("--" if port is None else f"{port:.1%}")

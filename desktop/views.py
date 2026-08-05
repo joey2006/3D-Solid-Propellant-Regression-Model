@@ -25,6 +25,8 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
+from srm_burnback.units import format_value, from_si, units_for
+
 from . import theme
 from .widgets import Banner, HelpButton, MetricGrid, divider, hint
 
@@ -175,7 +177,7 @@ class MeshView(QWidget):
         self._section_invert = True
         # Display units for the cut readout, kept in step with the
         # Measurements panel so the whole app never mixes units.
-        self._units = "in"
+        self._units = "imperial"
         self._set_section_enabled(False)
 
         # Facets meeting at less than this angle are treated as one smooth
@@ -554,10 +556,7 @@ class MeshView(QWidget):
         span = bounds[2 * axis + 1] - bounds[2 * axis]
         amount = self.section_slider.value() / 1000.0
         depth = amount * span
-        if self._units == "in":
-            shown = f"{depth / 0.0254:.3f} in"
-        else:
-            shown = f"{depth * 1000:.1f} mm"
+        shown = format_value(depth, "length", self._units)
         self.section_readout.setText(f"{shown}  ({amount:.0%})")
 
     def _on_section_toggled(self, checked: bool) -> None:
@@ -624,8 +623,8 @@ class MeshView(QWidget):
             self._render()
 
     def set_units(self, units: str) -> None:
-        """Switch the cut readout between ``"mm"`` and ``"in"``."""
-        if units in ("mm", "in") and units != getattr(self, "_units", None):
+        """Follow the app-wide unit system for the cut readout."""
+        if units in ("metric", "imperial") and units != getattr(self, "_units", None):
             self._units = units
             if self.plotter is not None:
                 self._update_section_readout()
@@ -867,7 +866,7 @@ class FieldView(QWidget):
         self._mode = "phi"
         self._colorbar = None
         # Kept in step with the Measurements panel so the app never mixes units.
-        self._units = "in"
+        self._units = "imperial"
 
         # --- toolbar ------------------------------------------------------
         bar = QWidget()
@@ -1126,14 +1125,18 @@ class FieldView(QWidget):
         length, so it is dimensionless and equals 1 in any unit system; giving
         it a unit would be wrong, not just noisy.
         """
-        if units not in ("mm", "in"):
+        if units not in ("metric", "imperial"):
             return
         self._units = units
         self._redraw()
 
     def _to_display(self, values):
-        """Metres to the current display unit."""
-        return values / 0.0254 if self._units == "in" else values * 1000.0
+        """Metres to the current display unit. Works on arrays as well as scalars."""
+        return from_si(values, "length", units_for("length", self._units))
+
+    def _length_unit(self) -> str:
+        """The bare unit symbol, for axis and colour-bar labels."""
+        return units_for("length", self._units)
 
     def set_estimate(self, seconds: float | None) -> None:
         """Show how long a build will take, before it is started.
@@ -1335,11 +1338,7 @@ class FieldView(QWidget):
 
         field = np.take(self._phi, index, axis=axis)
         position = float(np.take(self._coords[axis], index, axis=axis).flat[0])
-        self.slice_readout.setText(
-            f"{self._to_display(position):.3f} in"
-            if self._units == "in"
-            else f"{self._to_display(position):.1f} mm"
-        )
+        self.slice_readout.setText(format_value(position, "length", self._units))
 
         # The two in-plane axes, in tensor order, so the picture is not
         # transposed relative to the 3D view.
@@ -1392,7 +1391,7 @@ class FieldView(QWidget):
                 horizontal, vertical, shown, cmap=cmap, shading="auto",
                 vmin=low, vmax=high,
             )
-            label = f"φ  ({self._units})"
+            label = f"φ  ({self._length_unit()})"
 
         self._colorbar = self._figure.colorbar(mesh, ax=self._axes)
         self._colorbar.set_label(label, color=theme.TEXT_MUTED)
@@ -1453,10 +1452,10 @@ class FieldView(QWidget):
         self._axes.set_aspect("equal")
         names = "XYZ"
         self._axes.set_xlabel(
-            f"{names[plane[0]]} ({self._units})", color=theme.TEXT_MUTED
+            f"{names[plane[0]]} ({self._length_unit()})", color=theme.TEXT_MUTED
         )
         self._axes.set_ylabel(
-            f"{names[plane[1]]} ({self._units})", color=theme.TEXT_MUTED
+            f"{names[plane[1]]} ({self._length_unit()})", color=theme.TEXT_MUTED
         )
         self._axes.tick_params(colors=theme.TEXT_MUTED, labelsize=8)
         for spine in self._axes.spines.values():

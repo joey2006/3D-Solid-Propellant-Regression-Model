@@ -154,10 +154,15 @@ class MainWindow(QMainWindow):
         self.propellant_panel.changed.connect(self._refresh_measurements)
         # Remember the unit choice; it is a preference, not per-file state.
         self.measurements_panel.units_changed.connect(self._on_units_changed)
-        units = str(self._settings.value("units", "in"))
+        # "in"/"mm" was the old per-quantity setting; anything that is not
+        # a system name falls back to imperial, which was the old default.
+        units = str(self._settings.value("units", "imperial"))
+        if units not in ("metric", "imperial"):
+            units = "metric" if units == "mm" else "imperial"
         self.measurements_panel.set_units(units, notify=False)
         self.mesh_view.set_units(units)
         self.field_view.set_units(units)
+        self.propellant_panel.set_units(units)
 
         self._docks: dict[str, QDockWidget] = {}
         self._add_dock("Geometry", self.geometry_panel, Qt.LeftDockWidgetArea)
@@ -575,6 +580,7 @@ class MainWindow(QMainWindow):
         self._settings.setValue("units", units)
         self.mesh_view.set_units(units)
         self.field_view.set_units(units)
+        self.propellant_panel.set_units(units)
 
     def _refresh_measurements(self) -> None:
         """Recompute grain dimensions for the current mesh and density."""
@@ -584,7 +590,7 @@ class MainWindow(QMainWindow):
         try:
             self.measurements_panel.set_measurements(
                 grain_measurements(
-                    self._mesh, density=self.propellant_panel.density.value()
+                    self._mesh, density=self.propellant_panel.density_value()
                 )
             )
         except Exception:
