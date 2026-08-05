@@ -1274,51 +1274,34 @@ class FieldView(QWidget):
 
     # -- drawing -----------------------------------------------------------
 
+    #: Flat tone for everything outside the casing. Darker than the colour
+    #: map's deepest blue so the casing wall reads as a hard edge, but still
+    #: clearly a colour rather than the panel background behind a hole.
+    OUTSIDE_CASING = "#03162b"
+
     def _phi_colours(self):
-        """Colormap and limits for φ: full range on the grain, a dark tail beyond.
+        """Colormap and limits for φ: full range on the grain, flat outside it.
 
-        Two things are wanted at once, and a single linear scale gives only one
-        of them. Scaling to the whole domain flattens the grain, because φ keeps
-        decreasing far outside the casing and most of the range is spent on
-        empty space. Scaling to the grain instead — the previous behaviour —
-        renders the grain properly but clips everything past the wall to one
-        flat blue, so the field appears to stop existing there.
+        φ keeps decreasing well beyond the casing -- correctly, since the solver
+        needs a smooth field over the whole grid -- but none of that is the
+        user's business. Letting it take part of the colour range costs the
+        grain contrast, and letting it keep evolving draws the eye to padding
+        while the actual geometry sits in a narrow band of blues.
 
-        So the colormap is extended rather than the limits. Across the grain it
-        is the usual diverging map at full strength. Beyond the casing it
-        continues from that map's darkest blue down towards black, which keeps
-        the field visibly deepening outward while costing the grain none of its
-        range. The scale stays linear throughout, so the colour bar still reads
-        in plain units — the reason an asinh norm was rejected here.
+        So the range is the grain's alone, and everything past the casing is
+        painted one flat darker tone. The wall becomes a hard visual edge,
+        which is honest: it is a hard *physical* edge, the boundary the burn
+        can never cross.
+
+        Values are masked rather than clipped, so the flat tone comes from the
+        colormap's "bad" colour and cannot be confused with a real φ value at
+        the bottom of the scale.
         """
         from matplotlib import colormaps
-        from matplotlib.colors import LinearSegmentedColormap
 
-        base = colormaps["RdBu_r"]
-        core = self._to_display(self._phi_core)
-        span = self._to_display(self._phi_span)
-
-        # Nothing outside the casing to shade: the plain map is correct.
-        if not span > core * 1.02:
-            return base, -core, core
-
-        samples = base(np.linspace(0.0, 1.0, 224))
-        darkest = samples[0]
-        # Ramp the extension down to near-black rather than to true black, so
-        # the far field stays distinguishable from the panel background.
-        floor = np.array([0.02, 0.04, 0.09, 1.0])
-        tail = np.linspace(0.0, 1.0, 96)[:, None] * (darkest - floor) + floor
-
-        fraction = (span - core) / (span + core)
-        stops = np.concatenate([tail, samples])
-        positions = np.concatenate([
-            np.linspace(0.0, fraction, len(tail), endpoint=False),
-            np.linspace(fraction, 1.0, len(samples)),
-        ])
-        cmap = LinearSegmentedColormap.from_list(
-            "phi_with_dark_tail", list(zip(positions, stops))
-        )
-        return cmap, -span, core
+        cmap = colormaps["RdBu_r"].with_extremes(bad=self.OUTSIDE_CASING)
+        limit = self._to_display(self._phi_core)
+        return cmap, -limit, limit
 
     def _histogram(self, axes, values, np) -> None:
         """Distribution of |∇φ| in the near-surface band, against the ideal 1."""
@@ -1400,6 +1383,11 @@ class FieldView(QWidget):
         else:
             shown = self._to_display(field)
             cmap, low, high = self._phi_colours()
+            if casing_slice is not None and (casing_slice >= 0).any():
+                # Masked, not clipped: the flat tone then comes from the
+                # colormap's "bad" colour and can never be mistaken for a real
+                # φ value sitting at the bottom of the scale.
+                shown = np.ma.masked_where(casing_slice >= 0, shown)
             mesh = self._axes.pcolormesh(
                 horizontal, vertical, shown, cmap=cmap, shading="auto",
                 vmin=low, vmax=high,
