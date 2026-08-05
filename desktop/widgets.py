@@ -10,9 +10,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -164,8 +166,9 @@ def hint(text: str) -> QLabel:
     """A small explanatory caption under a control.
 
     Tooltips are invisible until hovered, which is no help to someone meeting
-    a control for the first time and wondering what it even is. These sit on
-    the panel permanently.
+    a control for the first time and wondering what it even is. These are
+    revealed together by the ``?`` on the enclosing :class:`HelpGroup` rather
+    than sitting on the panel permanently -- see that class for why.
     """
     label = QLabel(text)
     label.setWordWrap(True)
@@ -173,6 +176,108 @@ def hint(text: str) -> QLabel:
         f"color:{theme.TEXT_FAINT}; font-size:11px; padding:0 0 4px 0;"
     )
     return label
+
+
+class HelpButton(QToolButton):
+    """A small circular ``?`` that toggles explanatory text on and off.
+
+    Checkable rather than momentary, and it stays lit while help is showing, so
+    the button doubles as the indicator for the state it controls -- there is
+    nothing else on screen saying "help is on".
+    """
+
+    SIZE = 18
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setText("?")
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setToolTip("Explain these controls")
+        self.setStyleSheet(
+            f"""
+            QToolButton {{
+                background: transparent;
+                border: 1px solid {theme.BORDER_STRONG};
+                border-radius: {self.SIZE // 2}px;
+                color: {theme.TEXT_FAINT};
+                font-size: 11px;
+                font-weight: 700;
+                padding: 0;
+            }}
+            QToolButton:hover {{
+                border-color: {theme.ACCENT};
+                color: {theme.ACCENT};
+            }}
+            QToolButton:checked {{
+                background: {theme.ACCENT_SOFT};
+                border-color: {theme.ACCENT};
+                color: {theme.ACCENT};
+            }}
+            """
+        )
+
+
+class HelpGroup(QGroupBox):
+    """A titled box whose explanatory text is hidden behind a ``?`` toggle.
+
+    Every control in this app needs a sentence of explanation -- the domain is
+    unfamiliar enough that "Domain margin" or "CFL number" means nothing on
+    sight. Printing all of that permanently was honest but turned each panel
+    into a wall of grey prose, and the prose crowded out the controls it was
+    describing.
+
+    So the text still exists, in full, but it is collapsed by default and
+    revealed per-box. Once you know what a box does you never expand it again;
+    the first time you meet it, one click explains every control at once. That
+    is deliberately *not* a tooltip: a tooltip explains one control to someone
+    who already suspected which control to hover.
+
+    Help lines are children of the box's own layout, so expanding one grows
+    that box and nothing else moves independently of it.
+    """
+
+    def __init__(self, title: str, parent: QWidget | None = None):
+        super().__init__(title, parent)
+        self._help_widgets: list[QWidget] = []
+        self._button = HelpButton(self)
+        self._button.toggled.connect(self._set_help_visible)
+        self._button.raise_()
+
+    def add_help(self, text: str) -> QLabel:
+        """Add a hidden explanatory line, revealed by this box's ``?``.
+
+        Returns the label so the caller can place it in the layout wherever it
+        belongs -- usually directly under the control it describes.
+        """
+        label = hint(text)
+        label.setVisible(self._button.isChecked())
+        self._help_widgets.append(label)
+        return label
+
+    def register_help(self, widget: QWidget) -> QWidget:
+        """Put an existing widget under this box's ``?`` toggle."""
+        widget.setVisible(self._button.isChecked())
+        self._help_widgets.append(widget)
+        return widget
+
+    def set_help_visible(self, visible: bool) -> None:
+        self._button.setChecked(visible)
+
+    def _set_help_visible(self, visible: bool) -> None:
+        for widget in self._help_widgets:
+            widget.setVisible(visible)
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt naming
+        # QGroupBox has no corner-widget slot, so the button is positioned by
+        # hand into the title row: 20 px of margin-top above the frame, with
+        # the title sitting at the left. Keeping it inside that band means it
+        # never collides with the controls below, whatever they are.
+        super().resizeEvent(event)
+        size = self._button.width()
+        self._button.move(max(0, self.width() - size - 8), 1)
 
 
 def divider() -> QFrame:

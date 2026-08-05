@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme
-from .widgets import Banner, MetricGrid, divider
+from .widgets import Banner, HelpButton, MetricGrid, divider, hint
 
 try:
     import pyvista as pv
@@ -633,7 +633,18 @@ class MeshDataView(QWidget):
         self.banner = Banner()
         layout.addWidget(self.banner)
 
-        layout.addWidget(self._section("Topology"))
+        self._add_section(
+            layout,
+            "Topology",
+            "What kind of surface arrived. 'Triangles' sets how long the "
+            "sign field takes to build, since the cost is cells × "
+            "triangles. 'Watertight' says whether the surface is fully "
+            "closed: an open one still works — the generalized winding "
+            "number degrades gracefully where ray casting would mis-sign "
+            "whole regions — but volume and mass cannot be defined for it. "
+            "'Degenerate' counts zero-area triangles, which have no "
+            "well-defined normal.",
+        )
         self.topology = MetricGrid(4)
         self.topology.add("triangles", "Triangles", "Sets the cost of the sign field.")
         self.topology.add("vertices", "Vertices")
@@ -650,14 +661,32 @@ class MeshDataView(QWidget):
         )
         layout.addWidget(self.topology)
 
-        layout.addWidget(self._section("Extents  —  check against expected units"))
+        self._add_section(
+            layout,
+            "Extents  —  check against expected units",
+            "How big the grain is along each axis, in metres. Worth a "
+            "glance: this is the one place a unit mistake is visible. A "
+            "grain reading 50 × 50 × 120 was drawn in millimetres and is "
+            "1000× too large; 0.05 × 0.05 × 0.12 is correct. CAD files "
+            "declare their unit and are converted automatically, but STL "
+            "carries none.",
+        )
         self.extents = MetricGrid(4)
         for key, label in (("x", "X"), ("y", "Y"), ("z", "Z")):
             self.extents.add(key, label)
         self.extents.add("volume", "Volume", "Only defined for a closed surface.")
         layout.addWidget(self.extents)
 
-        layout.addWidget(self._section("Grid to be built"))
+        self._add_section(
+            layout,
+            "Grid to be built",
+            "The 3D box of sample points the simulation will run on. "
+            "'Spacing h' is the distance between neighbouring points, so "
+            "any feature thinner than it — a slot, a thin web, a tear in "
+            "the mesh — is invisible to the solver. 'Cells across' is how "
+            "many points span the grain, and 'Est. sign field' is roughly "
+            "how long the import will take at this resolution.",
+        )
         self.grid = MetricGrid(4)
         self.grid.add("cells", "Cells")
         self.grid.add("spacing", "Spacing h")
@@ -676,13 +705,39 @@ class MeshDataView(QWidget):
 
         layout.addStretch(1)
 
-    def _section(self, text: str) -> QLabel:
+    def _add_section(self, layout, text: str, help_text: str) -> None:
+        """Add a section heading with a ``?`` explaining the tiles beneath it.
+
+        The tiles carry tooltips already, but a tooltip only helps someone who
+        has guessed which tile to hover. One toggle per section explains the
+        whole group at once and folds away again -- these diagnostics get read
+        at a glance on every import, so the prose must not sit permanently
+        between the user and the numbers.
+        """
         label = QLabel(text.upper())
         label.setStyleSheet(
             f"color:{theme.TEXT_FAINT}; font-size:10px; font-weight:600;"
             "letter-spacing:1.2px; margin-top:6px;"
         )
-        return label
+
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(6)
+        header_layout.addWidget(label)
+        button = HelpButton()
+        header_layout.addWidget(button)
+        header_layout.addStretch(1)
+
+        # The explanation goes into the parent layout rather than the header
+        # row, so it reflows to the full panel width instead of being squeezed
+        # in beside the heading.
+        explanation = hint(help_text)
+        explanation.hide()
+        button.toggled.connect(explanation.setVisible)
+
+        layout.addWidget(header)
+        layout.addWidget(explanation)
 
     def clear(self) -> None:
         self.title.setText("No mesh loaded")

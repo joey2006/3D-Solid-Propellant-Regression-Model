@@ -13,7 +13,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -24,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme
-from .widgets import FieldRow, hint
+from .widgets import FieldRow, HelpGroup
 
 # Powers-of-two-ish resolutions. The winding number is O(cells x triangles), so
 # cost scales with the cube of this -- a free-form spin box invites a user to
@@ -47,7 +46,7 @@ class GeometryPanel(QWidget):
         layout.setSpacing(12)
 
         # --- Source -------------------------------------------------------
-        source_box = QGroupBox("Source")
+        source_box = HelpGroup("Source")
         source_layout = QVBoxLayout(source_box)
         source_layout.setSpacing(8)
 
@@ -66,7 +65,7 @@ class GeometryPanel(QWidget):
         )
         source_layout.addWidget(FieldRow("Grain type", self.grain_type))
         source_layout.addWidget(
-            hint(
+            source_box.add_help(
                 "Where the shape comes from. Only imported meshes are wired "
                 "up today: you supply a mesh (STL/OBJ/PLY) or a CAD file "
                 "(STEP/STP) and it becomes the grain. "
@@ -87,6 +86,12 @@ class GeometryPanel(QWidget):
         self.recent_combo.setToolTip("Files you have opened before.")
         self.recent_combo.activated.connect(self._on_recent_picked)
         source_layout.addWidget(FieldRow("Recent", self.recent_combo))
+        source_layout.addWidget(
+            source_box.add_help(
+                "Files you have opened before. Picking one re-imports it "
+                "without going back through the file dialog."
+            )
+        )
 
         self.open_button = QPushButton("Open mesh...")
         self.open_button.setProperty("accent", True)
@@ -96,7 +101,7 @@ class GeometryPanel(QWidget):
         layout.addWidget(source_box)
 
         # --- Grid ---------------------------------------------------------
-        grid_box = QGroupBox("Simulation grid")
+        grid_box = HelpGroup("Simulation grid")
         grid_layout = QVBoxLayout(grid_box)
         grid_layout.setSpacing(8)
 
@@ -125,7 +130,7 @@ class GeometryPanel(QWidget):
             )
         )
         grid_layout.addWidget(
-            hint(
+            grid_box.add_help(
                 "How finely the grain is chopped up before simulating. The "
                 "grid is a 3D box of points: 64³ is 262k points, 128³ is 2.1M. "
                 "Higher resolves thin webs and slot corners, but cost grows "
@@ -148,7 +153,7 @@ class GeometryPanel(QWidget):
             )
         )
         grid_layout.addWidget(
-            hint(
+            grid_box.add_help(
                 "Empty space left around the grain, as a fraction of its size "
                 "(0.05 = 5% padding). The burn front must never touch the edge "
                 "of the box, where the maths stops being valid. Larger is "
@@ -159,7 +164,7 @@ class GeometryPanel(QWidget):
         layout.addWidget(grid_box)
 
         # --- Compute ------------------------------------------------------
-        device_box = QGroupBox("Compute")
+        device_box = HelpGroup("Compute")
         device_layout = QVBoxLayout(device_box)
         device_layout.setSpacing(8)
 
@@ -169,7 +174,7 @@ class GeometryPanel(QWidget):
         self.device.currentIndexChanged.connect(self.changed)
         device_layout.addWidget(FieldRow("Device", self.device))
         device_layout.addWidget(
-            hint(
+            device_box.add_help(
                 "Where the heavy maths runs. Converting a mesh into a "
                 "simulation field is embarrassingly parallel and roughly "
                 "90x faster on the GPU than the CPU."
@@ -264,7 +269,7 @@ class PropellantPanel(QWidget):
         layout.setSpacing(12)
 
         # --- Vieille ------------------------------------------------------
-        vieille_box = QGroupBox("Burn rate  r = a Pⁿ")
+        vieille_box = HelpGroup("Burn rate  r = a Pⁿ")
         vieille_layout = QVBoxLayout(vieille_box)
         vieille_layout.setSpacing(8)
 
@@ -293,10 +298,11 @@ class PropellantPanel(QWidget):
             FieldRow("Exponent n", self.n, "Pressure exponent. n ≥ 1 is unstable.")
         )
         vieille_layout.addWidget(
-            hint(
+            vieille_box.add_help(
                 "How fast the propellant burns, as rate = a x pressure^n. "
                 "'a' sets the base speed and 'n' how strongly pressure "
-                "accelerates it. n at or above 1 makes the motor unstable."
+                "accelerates it. n at or above 1 makes the motor unstable. "
+                "'a' follows the MPa convention, so pressure goes in as MPa."
             )
         )
 
@@ -308,11 +314,17 @@ class PropellantPanel(QWidget):
         self.density.setSuffix("  kg/m³")
         self.density.valueChanged.connect(self.changed)
         vieille_layout.addWidget(FieldRow("Density ρ", self.density))
+        vieille_layout.addWidget(
+            vieille_box.add_help(
+                "Propellant density, used to turn the measured grain volume "
+                "into a propellant mass."
+            )
+        )
 
         layout.addWidget(vieille_box)
 
         # --- Erosive ------------------------------------------------------
-        erosive_box = QGroupBox("Erosive burning  (Lenoir–Robillard)")
+        erosive_box = HelpGroup("Erosive burning  (Lenoir–Robillard)")
         erosive_layout = QVBoxLayout(erosive_box)
         erosive_layout.setSpacing(8)
 
@@ -337,6 +349,15 @@ class PropellantPanel(QWidget):
         self.beta.setValue(0.0)
         self.beta.setEnabled(False)
         erosive_layout.addWidget(FieldRow("Coefficient β", self.beta))
+        erosive_layout.addWidget(
+            erosive_box.add_help(
+                "Combustion gas accelerates down the bore toward the nozzle, "
+                "so it scrubs the surface harder at the aft end and the grain "
+                "burns faster there. α scales that extra rate with the local "
+                "mass flux; β damps it where the surface is already receding "
+                "fast. This is why the front is never a plain cylinder."
+            )
+        )
 
         pending = QLabel("Pending the erosive burn-rate model (#13).")
         pending.setStyleSheet(f"color:{theme.TEXT_FAINT}; font-size:11px;")
@@ -357,7 +378,7 @@ class SimulationPanel(QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
 
-        box = QGroupBox("Run")
+        box = HelpGroup("Run")
         box_layout = QVBoxLayout(box)
         box_layout.setSpacing(8)
 
@@ -368,8 +389,10 @@ class SimulationPanel(QWidget):
         self.max_time.setSuffix("  s")
         box_layout.addWidget(FieldRow("Max time", self.max_time))
         box_layout.addWidget(
-            hint("How long to simulate before stopping, if the grain has not "
-                 "burnt out first.")
+            box.add_help(
+                "How long to simulate before stopping, if the grain has not "
+                "burnt out first."
+            )
         )
 
         self.cfl = QDoubleSpinBox()
@@ -398,7 +421,7 @@ class SimulationPanel(QWidget):
             )
         )
         box_layout.addWidget(
-            hint(
+            box.add_help(
                 "CFL is the timestep safety factor — smaller is slower but "
                 "more stable, and above 1 the solver blows up. Reinit "
                 "periodically cleans up numerical drift in the surface field."
@@ -453,6 +476,11 @@ class MeasurementsPanel(QWidget):
         self._units = "in"
         self._data: dict | None = None
 
+        box = HelpGroup("Grain dimensions")
+        box_layout = QVBoxLayout(box)
+        box_layout.setSpacing(8)
+        layout.addWidget(box)
+
         unit_row = QWidget()
         unit_layout = QHBoxLayout(unit_row)
         unit_layout.setContentsMargins(0, 0, 0, 0)
@@ -473,23 +501,47 @@ class MeasurementsPanel(QWidget):
         # Imperial by default: experimental motor work is dimensioned in
         # inches, and it is the units most parts arrive in.
         self._unit_buttons["in"].setChecked(True)
-        layout.addWidget(unit_row)
+        box_layout.addWidget(unit_row)
+        box_layout.addWidget(
+            box.add_help(
+                "Which units these are shown in. The engine works in metres "
+                "throughout and converts only here, at the very edge, so a "
+                "unit mistake can only ever be a display mistake."
+            )
+        )
 
+        # Each row is a name/value pair with its explanation on the line
+        # underneath. The explanation is hidden until the box's "?" is on:
+        # "Web" and "Port fraction" mean nothing on first sight, but once you
+        # know them the prose is pure clutter sitting between you and the
+        # numbers you came to read.
         self._rows: dict[str, QLabel] = {}
         for key, text, tip in (
-            ("length", "Length", "Extent along the grain axis."),
-            ("outer_diameter", "Outer dia.", "Across the outer wall."),
+            ("length", "Length", "End to end along the grain axis."),
+            ("outer_diameter", "Outer dia.",
+             "Across the outer wall — the widest the grain gets, which is what "
+             "has to fit inside the casing."),
             ("bore_diameter", "Bore dia.",
-             "Across the narrowest inward-facing surface."),
+             "Across the narrowest inward-facing surface: the hole up the "
+             "middle that the exhaust flows through and that the burn starts "
+             "from."),
             ("web_thickness", "Web",
-             "Propellant between bore and outer wall - what has to burn through."),
-            ("length_to_diameter", "L/D", "Length over outer diameter."),
-            ("volume", "Volume", "Propellant volume. Needs a closed surface."),
+             "Propellant between the bore and the outer wall — the thickness "
+             "that has to burn through, so it sets the burn time."),
+            ("length_to_diameter", "L/D",
+             "Length divided by outer diameter. A long, slender grain has more "
+             "gas accelerating down its bore, so it burns harder at the aft "
+             "end."),
+            ("volume", "Volume",
+             "How much propellant there is. Needs a closed surface, so it "
+             "reads '--' for a mesh with holes in it."),
             ("mass", "Mass",
-             "Volume times the density set in the Propellant panel."),
+             "Volume times the density set in the Propellant panel. This is "
+             "the propellant load — what determines total impulse."),
             ("port_fraction", "Port fraction",
-             "Share of the envelope that is void. A near-zero value means no "
-             "bore was found."),
+             "Share of the grain's envelope that is empty space. Near zero "
+             "means no bore was found, which usually points at a winding or "
+             "orientation problem rather than a solid grain."),
         ):
             row = QWidget()
             row_layout = QHBoxLayout(row)
@@ -505,16 +557,16 @@ class MeasurementsPanel(QWidget):
             row_layout.addStretch(1)
             row_layout.addWidget(value)
             row.setToolTip(tip)
-            layout.addWidget(row)
+            box_layout.addWidget(row)
+            box_layout.addWidget(box.add_help(tip))
             self._rows[key] = value
 
-        layout.addWidget(
-            hint(
-                "Measured from the imported geometry, not entered by hand - an "
-                "uploaded object arrives as triangles with no parameters "
-                "attached, so the bore and web are recovered from the surface "
-                "normals. Values read a hair under the true size because a "
-                "tessellated circle sits inside the real one."
+        box_layout.addWidget(
+            box.add_help(
+                "All of these are measured from the imported geometry, not "
+                "entered by hand — an uploaded object arrives as triangles "
+                "with no parameters attached, so the bore and web are "
+                "recovered from the surface normals."
             )
         )
         layout.addStretch(1)
