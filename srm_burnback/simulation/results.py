@@ -36,6 +36,9 @@ class SimulationResults:
         # Filled in by the runner when the propellant is exhausted.
         self.burned_out: bool = False
         self.burnout_time: float | None = None
+        #: True when a caller stopped the run early through ``run(on_step=...)``.
+        #: A stopped run is a valid short history, not a failure.
+        self.stopped: bool = False
 
     def record(
         self,
@@ -90,4 +93,5 @@ class SimulationResults:
             "snapshot_times": list(self.snapshot_times),
             "burned_out": self.burned_out,
             "burnout_time": self.burnout_time,
+            "stopped": self.stopped,
         }

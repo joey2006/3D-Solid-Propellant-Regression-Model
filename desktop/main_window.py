@@ -28,6 +28,9 @@ from PySide6.QtWidgets import (
 )
 
 from srm_burnback.geometry.measurements import grain_measurements
+from srm_burnback.geometry.MeshGrain import MeshGrain
+from srm_burnback.physics.vieille import VieilleBurnRate
+from srm_burnback.simulation.config import SimulationConfig
 from srm_burnback.geometry.import_mesh import (
     CAD_SUFFIXES,
     MESH_SUFFIXES,
@@ -47,7 +50,7 @@ from .panels import (
 )
 from .views import FieldView, MeshDataView, MeshView
 from .design import SUFFIX, Design, DesignError
-from .workers import MeshLoadWorker, PhiWorker
+from .workers import MeshLoadWorker, PhiWorker, SimulationWorker
 
 ORG = "SRM Burnback"
 APP = "Burnback Studio"
@@ -71,6 +74,7 @@ class MainWindow(QMainWindow):
         self._worker: MeshLoadWorker | None = None
         self._settings = QSettings(ORG, APP)
         self._design_path: Path | None = None
+        self._results = None
         # Guards the undo recorder while a design is being restored, so one
         # restore is one undo step rather than one per control.
         self._applying = False
@@ -158,6 +162,8 @@ class MainWindow(QMainWindow):
         self.geometry_panel.recent_selected.connect(
             lambda p: self.load_path(Path(p))
         )
+        self.simulation_panel.run_requested.connect(self.run_simulation)
+        self.simulation_panel.stop_requested.connect(self.stop_simulation)
         self.geometry_panel.changed.connect(self._refresh_grid_metrics)
         # Every settings change is an undo point (#156).
         self.geometry_panel.changed.connect(self._push_undo)
@@ -435,6 +441,7 @@ class MainWindow(QMainWindow):
         # A new mesh invalidates any phi built from the previous one.
         self.field_view.clear()
         self.field_view.set_mesh_available(True)
+        self.simulation_panel.set_running(False, can_run=True)
         self._populate_data_view()
         self._refresh_measurements()
         self._refresh_grid_metrics()
@@ -526,6 +533,7 @@ class MainWindow(QMainWindow):
         self.data_view.clear()
         self.field_view.clear()
         self.field_view.set_mesh_available(False)
+        self.simulation_panel.set_running(False, can_run=False)
         self.measurements_panel.clear()
         self._refresh_grid_metrics()
         self.status_message.setText("Ready")
@@ -679,6 +687,119 @@ class MainWindow(QMainWindow):
         # Reading it off a tile on another tab requires already knowing
         # to look; on the button it is unavoidable.
         self.field_view.set_estimate(cost)
+
+    # -- Running a simulation (#132) ---------------------------------------
+
+    def run_simulation(self) -> None:
+        """Burn the loaded grain, off the UI thread."""
+        if self._mesh is None or self._thread is not None:
+            return
+
+        propellant = self.propellant_panel.propellant_value()
+        if propellant.n >= 1.0:
+            QMessageBox.warning(
+                self,
+                "Unstable propellant",
+                f"The pressure exponent n = {propellant.n:.3f} is at or above "
+                "1. Burn rate would then rise faster than the chamber can "
+                "relieve pressure, so the motor runs away and the simulation "
+                "has no steady solution to find.",
+            )
+            return
+
+        try:
+            grain = MeshGrain(
+                self._mesh, ends=self.geometry_panel.ends_value()
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Cannot simulate this grain", str(exc))
+            return
+
+        stopping = self.simulation_panel.config_values()
+        config = SimulationConfig(
+            resolution=self.geometry_panel.resolution_points(),
+            domain_size=grain.default_domain_size(),
+            length=grain.default_length(),
+            device=self.geometry_panel.device_string(),
+            pressure=self._pressure_mpa(),
+            verbose=False,
+            **stopping,
+        )
+
+        self._set_busy(True, "Running simulation...", determinate=True)
+        self.simulation_panel.set_running(True)
+        self.simulation_panel.set_summary("Building the initial field...")
+
+        self._thread = QThread(self)
+        self._worker = SimulationWorker(
+            grain,
+            VieilleBurnRate(a=propellant.a, n=propellant.n),
+            config,
+        )
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_simulation_progress)
+        self._worker.finished.connect(self._on_simulation_finished)
+        self._worker.failed.connect(self._on_simulation_failed)
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.failed.connect(self._thread.quit)
+        self._thread.finished.connect(self._cleanup_thread)
+        self._thread.start()
+
+    def stop_simulation(self) -> None:
+        if isinstance(self._worker, SimulationWorker):
+            self._worker.stop()
+            self.simulation_panel.set_summary("Stopping...")
+
+    def _pressure_mpa(self) -> float:
+        """Chamber pressure for the burn-rate law, in MPa.
+
+        Constant for now: computing it from burn area and throat is Phase 6
+        (#16), and it is the single biggest reason a number out of this app is
+        not yet a motor prediction.
+        """
+        return 5.0
+
+    def _on_simulation_progress(self, percent: int, message: str) -> None:
+        self.progress.setValue(percent)
+        self.status_message.setText(message)
+
+    def _on_simulation_finished(self, results, summary) -> None:
+        self._results = results
+        self.simulation_panel.set_running(False, can_run=self._mesh is not None)
+
+        if summary["burned_out"]:
+            headline = f"Burnout at {summary['burnout_time']:.3f} s"
+            level = "ok"
+        elif summary["stopped"]:
+            headline = f"Stopped at {summary['time']:.3f} s"
+            level = "muted"
+        else:
+            headline = f"Reached the {summary['time']:.1f} s limit without burnout"
+            level = "warn"
+
+        self.simulation_panel.set_summary(
+            f"{headline} — {summary['steps']} steps in "
+            f"{summary['seconds']:.1f} s. Uniform burn rate, so this is a "
+            "numerical check rather than a motor prediction (#13, #16).",
+            level,
+        )
+        self.status_message.setText(headline)
+
+        if summary["reached_cap"]:
+            QMessageBox.information(
+                self,
+                "No burnout",
+                f"The run hit its {summary['time']:.1f} s limit with propellant "
+                "left.\n\nEither raise Max time, or check that the grain has a "
+                "bore for the burn to start from.",
+            )
+
+    def _on_simulation_failed(self, message: str) -> None:
+        self.simulation_panel.set_running(False, can_run=self._mesh is not None)
+        self.simulation_panel.set_summary("Run failed.", "warn")
+        self.status_message.setText("Simulation failed")
+        QMessageBox.warning(self, "Simulation failed", message)
 
     # -- Designs (#155) and undo (#156) ------------------------------------
 
@@ -875,8 +996,15 @@ class MainWindow(QMainWindow):
 
     # -- Layout / lifecycle ------------------------------------------------
 
-    def _set_busy(self, busy: bool, message: str = "") -> None:
+    def _set_busy(self, busy: bool, message: str = "", determinate: bool = False) -> None:
         self.progress.setVisible(busy)
+        # Import shows an indeterminate bar because the winding number gives no
+        # intermediate signal -- it is one long kernel. A burnback is a loop, so
+        # it can report real progress, and a bar that fills is the difference
+        # between "working" and "working, and here is how much is left".
+        self.progress.setRange(0, 100 if determinate else 0)
+        if determinate:
+            self.progress.setValue(0)
         self.open_action.setEnabled(not busy)
         self.geometry_panel.open_button.setEnabled(not busy)
         if message:

@@ -619,6 +619,7 @@ class SimulationPanel(QWidget):
     """Run controls and stopping criteria."""
 
     run_requested = Signal()
+    stop_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -682,20 +683,55 @@ class SimulationPanel(QWidget):
         self.run_button.setProperty("accent", True)
         self.run_button.setEnabled(False)
         self.run_button.setToolTip(
-            "Not wired up yet (#132). The engine can already burn an imported "
-            "grain — MeshGrain (#192) — but nothing connects this button to it."
+            "Burn the imported grain and record the history. Open a mesh first."
         )
         self.run_button.clicked.connect(self.run_requested)
         layout.addWidget(self.run_button)
 
-        # #158 landed, so the old "blocked on φ generation" note was simply
-        # wrong. What is missing now is the UI wiring, not the field.
-        blocked = QLabel("Not wired up yet (#132).")
-        blocked.setStyleSheet(f"color:{theme.TEXT_FAINT}; font-size:11px;")
-        blocked.setAlignment(Qt.AlignCenter)
-        layout.addWidget(blocked)
+        # Separate from Run rather than one toggling button: a control that
+        # changes what it does under the pointer is how you stop a run you
+        # meant to start.
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.setEnabled(False)
+        self.stop_button.setToolTip(
+            "Finish early and keep the history so far. A stopped run is a "
+            "short result, not a discarded one."
+        )
+        self.stop_button.clicked.connect(self.stop_requested)
+        layout.addWidget(self.stop_button)
+
+        self.summary = QLabel("No run yet.")
+        self.summary.setWordWrap(True)
+        self.summary.setStyleSheet(f"color:{theme.TEXT_FAINT}; font-size:11px;")
+        self.summary.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.summary)
 
         layout.addStretch(1)
+
+    # -- Run state (#132) --------------------------------------------------
+
+    def set_running(self, running: bool, can_run: bool = True) -> None:
+        """Swap between the idle and running control states."""
+        self.run_button.setEnabled(can_run and not running)
+        self.stop_button.setEnabled(running)
+        self.run_button.setText("Running..." if running else "Run simulation")
+
+    def set_summary(self, text: str, level: str = "muted") -> None:
+        colour = {
+            "muted": theme.TEXT_FAINT,
+            "ok": theme.OK,
+            "warn": theme.WARN,
+        }[level]
+        self.summary.setStyleSheet(f"color:{colour}; font-size:11px;")
+        self.summary.setText(text)
+
+    def config_values(self) -> dict:
+        """The stopping criteria, as the runner's config expects them."""
+        return {
+            "max_time": float(self.max_time.value()),
+            "cfl_factor": float(self.cfl.value()),
+            "reinit_interval": int(self.reinit_every.value()),
+        }
 
 
 class MeasurementsPanel(QWidget):

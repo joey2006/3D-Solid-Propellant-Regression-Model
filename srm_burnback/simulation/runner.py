@@ -162,8 +162,26 @@ class BurnbackSimulation:
 
     # --- the main loop (#65) --------------------------------------------------
 
-    def run(self) -> SimulationResults:
-        """Advance from t = 0 until burnout or ``max_time``; return the history."""
+    def run(self, on_step=None) -> SimulationResults:
+        """Advance from t = 0 until burnout or ``max_time``; return the history.
+
+        Parameters
+        ----------
+        on_step:
+            Optional ``callable(step, time, metrics) -> bool`` invoked after
+            every step. Returning ``False`` stops the run and returns the
+            history so far.
+
+            This exists so a UI can show progress and offer a stop button
+            (#132) without reimplementing the loop. Cancellation is cooperative
+            -- checked once per step rather than by killing a thread -- which is
+            enough here because a burnback is a long sequence of cheap steps.
+            (The winding number is the opposite: one long kernel that cannot be
+            interrupted, which is why *that* is warned about in advance
+            instead.)
+
+            A stopped run is a valid, if short, result rather than an error.
+        """
         if self.phi is None:
             self.initialize()
         cfg = self.config
@@ -212,6 +230,15 @@ class BurnbackSimulation:
                     f"step {self.step:5d}  t = {self.time:.4f}  "
                     f"propellant = {prop:.6g}"
                 )
+
+            if on_step is not None and on_step(self.step, self.time, {
+                "burning_perimeter": perim,
+                "port_area": port,
+                "propellant_area": prop,
+                "burn_rate": float(F.abs().max()),
+            }) is False:
+                results.stopped = True
+                break
 
             # 6. Burnout: no propellant left anywhere inside the casing.
             if burned_out:
