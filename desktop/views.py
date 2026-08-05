@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.colors import AsinhNorm
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
@@ -69,6 +70,10 @@ class MeshView(QWidget):
         bar_layout.setSpacing(6)
 
         self._style = "surface"
+        # Which face colouring is on show: geometric regions, or the
+        # burning/inhibited labelling phi is built from (#176).
+        self._colouring = "regions"
+        self._ends = "inhibited"
         self.surface_button = QPushButton("Surface")
         self.wireframe_button = QPushButton("Wireframe")
         for button, style in (
@@ -88,6 +93,25 @@ class MeshView(QWidget):
             "grid spacing to judge whether the mesh is resolved."
         )
 
+        bar_layout.addWidget(divider())
+
+        self._colour_buttons = {}
+        for code, text, tip in (
+            ("regions", "Regions",
+             "Colour by geometry: outer wall, bore and slots, end faces."),
+            ("burning", "Burning surfaces",
+             "Colour by what actually burns. Orange faces are lit and are the "
+             "ones φ measures distance from; grey faces are inhibited and never "
+             "recede. Check this before building φ — it is the assumption the "
+             "whole burn rests on."),
+        ):
+            button = QPushButton(text)
+            button.setCheckable(True)
+            button.setToolTip(tip)
+            button.clicked.connect(lambda _=False, c=code: self.set_colouring(c))
+            bar_layout.addWidget(button)
+            self._colour_buttons[code] = button
+        self._colour_buttons["regions"].setChecked(True)
 
         bar_layout.addStretch(1)
 
@@ -200,14 +224,14 @@ class MeshView(QWidget):
         self._mesh = mesh
         # Wrapping copies the geometry, so cache it: the section slider
         # re-renders on every tick and must not re-convert each time.
-        self._pv_mesh = self._classify_surface(pv.wrap(mesh))
+        self._pv_mesh = self._classify_surface(pv.wrap(mesh), mesh)
 
         self._set_section_enabled(True)
         self._update_section_readout()
         self._render(reset_camera=True)
 
     @staticmethod
-    def _classify_surface(mesh):
+    def _classify_surface(mesh, source=None):
         """Assign every face a flat colour plus a faint roughness grain.
 
         Colour has to distinguish the bore from the outer wall, and neither
@@ -265,6 +289,30 @@ class MeshView(QWidget):
             colours[alignment < -0.35] = rgb(theme.INTERIOR)  # bore
 
             mesh.cell_data["grain_rgb"] = colours
+
+            # The same faces, coloured by whether they burn (#176). This is the
+            # labelling phi is actually built from, shown on the geometry
+            # *before* spending seconds computing phi -- which is the point: a
+            # mislabelled grain is far cheaper to notice here than after.
+            #
+            # The labels come from `surface_labels`, the same function the
+            # field builder calls, rather than being re-derived from the
+            # alignment above. That is deliberate: if this view recomputed the
+            # classification it could drift from the one phi actually used, and
+            # the whole value of showing it is that the picture cannot lie
+            # about what will burn.
+            #
+            # Burning faces take the same accent as the burning-surface contour
+            # on the phi tab, so the two views agree on what orange means.
+            if source is not None:
+                from srm_burnback.geometry.surfaces import surface_labels
+
+                for ends in ("inhibited", "burning"):
+                    labels = surface_labels(source, ends=ends)["burning"]
+                    burn = np.empty((len(labels), 3), dtype=np.uint8)
+                    burn[:] = rgb(theme.SURFACE)
+                    burn[labels] = rgb(theme.ACCENT)
+                    mesh.cell_data[f"burn_rgb_{ends}"] = burn
             # Split vertices along sharp creases so smooth shading rounds
             # only genuinely curved regions, and bake the normals in --
             # this is why the render loop can skip `split_sharp_edges`.
@@ -275,12 +323,6 @@ class MeshView(QWidget):
             )
         except Exception:
             return mesh  # colouring is cosmetic; never block the view
-
-
-        except Exception:
-            return mesh
-
-
 
     def _render(self, reset_camera: bool = False) -> None:
         """Draw the cached mesh at the current style and section position.
@@ -314,7 +356,7 @@ class MeshView(QWidget):
             self._actor = self.plotter.add_mesh(
                 self._body_data,
                 style="wireframe" if wireframe else "surface",
-                scalars="grain_rgb" if not wireframe else None,
+                scalars=None if wireframe else self._scalar_array(),
                 rgb=True if not wireframe else None,
                 show_scalar_bar=False,
                 color=None if not wireframe else theme.SURFACE,
@@ -539,6 +581,36 @@ class MeshView(QWidget):
             self._request_render()
 
     # --- View state -------------------------------------------------------
+
+    def _scalar_array(self) -> str:
+        """Which per-face colour array the renderer should show."""
+        name = f"burn_rgb_{self._ends}"
+        if self._colouring == "burning" and self._pv_mesh is not None:
+            if name in self._pv_mesh.cell_data:
+                return name
+        return "grain_rgb"
+
+    def set_colouring(self, mode: str) -> None:
+        """Switch between geometric regions and the burning/inhibited labels."""
+        if mode not in ("regions", "burning"):
+            return
+        self._colouring = mode
+        for code, button in self._colour_buttons.items():
+            button.setChecked(code == mode)
+        # The arrays are all precomputed at load, so this is a scalar swap
+        # rather than a re-classification -- forcing the rebuild path is the
+        # simplest way to repoint the actor at a different array.
+        self._built_wireframe = None
+        self._request_render()
+
+    def set_ends(self, ends: str) -> None:
+        """Follow the End faces setting from the Geometry panel."""
+        if ends not in ("inhibited", "burning") or ends == self._ends:
+            return
+        self._ends = ends
+        if self._colouring == "burning":
+            self._built_wireframe = None
+            self._request_render()
 
     def set_style(self, style: str) -> None:
         self._style = style
@@ -783,6 +855,8 @@ class FieldView(QWidget):
         self._phi = None
         self._phi_outer = None
         self._coords = None
+        self._phi_span = 1.0
+        self._phi_core = 1.0
         self._h = 0.0
         self._axis = 2
         self._mode = "phi"
@@ -1081,6 +1155,21 @@ class FieldView(QWidget):
         self._phi_outer = (
             None if phi_outer is None else phi_outer.detach().to("cpu").numpy()
         )
+
+        # Colour limits come from the whole volume, once -- never per slice.
+        # Recomputing them per slice made the scale jump as the slider moved,
+        # and near the ends the in-casing mask holds only a handful of cells,
+        # so the limits were being set by almost nothing and the picture fell
+        # apart. Fixed limits also make two slices actually comparable.
+        import numpy as _np
+
+        self._phi_span = float(_np.abs(self._phi).max()) or 1.0
+        if self._phi_outer is not None and (self._phi_outer < 0).any():
+            self._phi_core = (
+                float(_np.abs(self._phi[self._phi_outer < 0]).max()) or self._phi_span
+            )
+        else:
+            self._phi_core = self._phi_span
         self._coords = [c.detach().to("cpu").numpy() for c in coords]
         self._h = h
 
@@ -1231,19 +1320,23 @@ class FieldView(QWidget):
             label = "|∇φ|"
         else:
             shown = self._to_display(field)
-            # Scale the colours to the *grain*, not the whole domain. phi keeps
-            # decreasing outside the casing -- correctly, and by design -- so a
-            # 0.12 m box around a 0.05 m grain spends most of its range on
-            # empty space, squashing everything inside the grain into one flat
-            # blue. Taking the limit from within the casing puts the full
-            # colour range where the geometry actually is.
-            if casing_slice is not None and (casing_slice < 0).any():
-                limit = float(np.abs(shown[casing_slice < 0]).max()) or 1.0
-            else:
-                limit = float(np.abs(shown).max()) or 1.0
+            # Two competing needs. phi keeps decreasing outside the casing --
+            # correctly, and by design -- so a 0.12 m box around a 0.05 m grain
+            # spends most of its range on empty space, flattening the grain
+            # into one blue. But hard-clipping to the grain put a false hard
+            # edge exactly at the outer wall, as though the field stopped there.
+            #
+            # An asinh norm does both: linear across the grain, where
+            # `linear_width` is the largest |phi| inside the casing, then
+            # smoothly compressed beyond it. The full range stays visible and
+            # the field visibly keeps evolving past the wall, with no break.
             mesh = self._axes.pcolormesh(
-                horizontal, vertical, shown,
-                cmap="RdBu_r", vmin=-limit, vmax=limit, shading="auto",
+                horizontal, vertical, shown, cmap="RdBu_r", shading="auto",
+                norm=AsinhNorm(
+                    linear_width=self._to_display(self._phi_core),
+                    vmin=-self._to_display(self._phi_span),
+                    vmax=self._to_display(self._phi_span),
+                ),
             )
             label = f"φ  ({self._units})"
 

@@ -145,6 +145,11 @@ class MainWindow(QMainWindow):
             lambda p: self.load_path(Path(p))
         )
         self.geometry_panel.changed.connect(self._refresh_grid_metrics)
+        # The 3D view shows which faces burn, so it has to follow the End
+        # faces setting -- the picture and phi must never disagree about it.
+        self.geometry_panel.changed.connect(
+            lambda: self.mesh_view.set_ends(self.geometry_panel.ends_value())
+        )
         # Mass is volume x density, so it has to follow the propellant panel.
         self.propellant_panel.changed.connect(self._refresh_measurements)
         # Remember the unit choice; it is a preference, not per-file state.
