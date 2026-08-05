@@ -882,7 +882,12 @@ class FieldView(QWidget):
         layout.addWidget(divider())
 
         # --- canvas -------------------------------------------------------
-        self._figure = Figure(figsize=(6, 5), facecolor=theme.VIEW_BG)
+        # Constrained layout rather than tight_layout: the gradient mode pairs a
+        # colorbar with a second subplot, which tight_layout cannot solve and
+        # warns about on every redraw.
+        self._figure = Figure(
+            figsize=(6, 5), facecolor=theme.VIEW_BG, layout="constrained"
+        )
         self._canvas = FigureCanvasQTAgg(self._figure)
         self._axes = self._figure.add_subplot(111)
         layout.addWidget(self._canvas, 1)
@@ -990,6 +995,26 @@ class FieldView(QWidget):
 
     # -- drawing -----------------------------------------------------------
 
+    def _histogram(self, axes, values, np) -> None:
+        """Distribution of |∇φ| in the near-surface band, against the ideal 1."""
+        axes.set_facecolor(theme.VIEW_BG)
+        axes.hist(
+            np.clip(values.ravel(), 0.7, 1.3), bins=60, range=(0.7, 1.3),
+            color=theme.ACCENT, alpha=0.85,
+        )
+        # The target, drawn so "is the mass on the line" is a glance rather
+        # than a reading of the axis.
+        axes.axvline(1.0, color=theme.OK, linewidth=1.2, linestyle="--")
+        outside = float((np.abs(values - 1.0) > 0.1).mean())
+        axes.set_title(
+            f"|grad phi| near the surface — {outside:.1%} outside ±10%",
+            color=theme.TEXT_MUTED, fontsize=9,
+        )
+        axes.set_yticks([])
+        axes.tick_params(colors=theme.TEXT_MUTED, labelsize=8)
+        for spine in axes.spines.values():
+            spine.set_color(theme.BORDER)
+
     def _redraw(self) -> None:
         if self._phi is None:
             return
@@ -1012,16 +1037,24 @@ class FieldView(QWidget):
         horizontal = np.take(self._coords[plane[0]], index, axis=axis)
         vertical = np.take(self._coords[plane[1]], index, axis=axis)
 
-        # A colorbar adds a new axes to the figure every time, so the old one
-        # is removed rather than left to stack up across redraws -- the slider
-        # fires this on every tick.
-        if self._colorbar is not None:
-            self._colorbar.remove()
-            self._colorbar = None
-        self._axes.clear()
+        # Rebuilt from scratch each time rather than cleared in place: the two
+        # modes need different figure layouts (the gradient view adds a
+        # histogram panel), and a colorbar is itself an axes, so reusing the
+        # figure means tracking and removing both. At slider speed the rebuild
+        # is not measurable.
+        self._figure.clear()
+        gradient_mode = self._mode == "grad"
+
+        if gradient_mode:
+            grid = self._figure.add_gridspec(2, 1, height_ratios=[3, 1])
+            self._axes = self._figure.add_subplot(grid[0])
+            histogram = self._figure.add_subplot(grid[1])
+        else:
+            self._axes = self._figure.add_subplot(111)
+            histogram = None
         self._axes.set_facecolor(theme.VIEW_BG)
 
-        if self._mode == "grad":
+        if gradient_mode:
             gradients = np.gradient(field, self._h)
             magnitude = np.sqrt(sum(g**2 for g in gradients))
             # Fixed 0.8-1.2 window: this is a deviation plot, so the question
@@ -1044,6 +1077,15 @@ class FieldView(QWidget):
         self._colorbar.set_label(label, color=theme.TEXT_MUTED)
         self._colorbar.ax.tick_params(colors=theme.TEXT_MUTED, labelsize=8)
 
+        if histogram is not None:
+            # The map says *where* the field degrades; the histogram says *how
+            # much of it* does. A thin spike on 1 is a clean distance field; a
+            # broad shoulder means the whole field is off, which the map cannot
+            # show because everything is uniformly slightly wrong.
+            near_surface = field.__abs__() < 3 * self._h
+            values = magnitude[near_surface] if near_surface.any() else magnitude
+            self._histogram(histogram, values, np)
+
         # The zero contour is the burning surface itself -- the one line in
         # this picture with physical meaning.
         if field.min() < 0.0 < field.max():
@@ -1060,5 +1102,4 @@ class FieldView(QWidget):
         for spine in self._axes.spines.values():
             spine.set_color(theme.BORDER)
 
-        self._figure.tight_layout()
         self._canvas.draw_idle()
