@@ -785,6 +785,8 @@ class FieldView(QWidget):
         self._axis = 2
         self._mode = "phi"
         self._colorbar = None
+        # Kept in step with the Measurements panel so the app never mixes units.
+        self._units = "in"
 
         # --- toolbar ------------------------------------------------------
         bar = QWidget()
@@ -793,7 +795,7 @@ class FieldView(QWidget):
         bar_layout.setContentsMargins(10, 7, 10, 7)
         bar_layout.setSpacing(6)
 
-        self.build_button = QPushButton("Build phi")
+        self.build_button = QPushButton("Build φ")
         self.build_button.setProperty("accent", True)
         self.build_button.setEnabled(False)
         self.build_button.setToolTip(
@@ -804,12 +806,23 @@ class FieldView(QWidget):
         self.build_button.clicked.connect(self.build_requested)
         bar_layout.addWidget(self.build_button)
 
+        show = QLabel("Show")
+        show.setStyleSheet(f"color:{theme.TEXT_MUTED}; font-size:12px;")
+        bar_layout.addWidget(show)
+
+        # Labelled by what they answer, not by the symbol they plot. "φ" and
+        # "|∇φ|" side by side read as decoration unless you already know the
+        # notation, and the second one is a quality check rather than a
+        # different view of the same thing.
         self._mode_buttons = {}
         for code, text, tip in (
-            ("phi", "phi", "The signed distance field itself, with the zero "
-                           "contour drawn. Blue is propellant, red is void."),
-            ("grad", "|grad phi|", "How far the field is from a true signed "
-                                   "distance. Should be 1 near the surface."),
+            ("phi", "φ  field",
+             "The signed distance field itself, with the burning surface drawn "
+             "as the zero contour. Blue is propellant, red is open void."),
+            ("grad", "|∇φ|  check",
+             "Whether φ is a valid distance field. |∇φ| must be 1 near the "
+             "surface; anywhere it is not, φ is misreporting distance and the "
+             "solver would inherit the error."),
         ):
             button = QPushButton(text)
             button.setCheckable(True)
@@ -843,6 +856,10 @@ class FieldView(QWidget):
         )
         bar_layout.addWidget(self.slice_readout)
 
+        self.help_button = HelpButton()
+        self.help_button.toggled.connect(self._set_help_visible)
+        bar_layout.addWidget(self.help_button)
+
         layout.addWidget(bar)
         layout.addWidget(divider())
 
@@ -853,16 +870,57 @@ class FieldView(QWidget):
         strip_layout.setContentsMargins(14, 10, 14, 12)
         strip_layout.setSpacing(8)
 
+        # Hidden behind the "?" like every other panel. This one carries more
+        # weight than most: φ is the least self-explanatory thing in the app,
+        # and unlike a bore diameter there is nothing familiar to fall back on.
+        self._help_widgets = []
+        for text in (
+            "<b>φ (phi) is the signed distance field.</b> For every point in a "
+            "3D grid around the grain it stores one number: how far that point "
+            "is from the burning surface, signed by which side it is on — "
+            "negative inside the propellant, positive in the open void, and "
+            "exactly zero <i>on</i> the surface. So the burning surface is not "
+            "stored as an object at all; it is wherever φ happens to be zero.",
+
+            "<b>Why store it that way?</b> Because burning is then just "
+            "arithmetic. To advance the surface you subtract the burn rate "
+            "from φ everywhere and the zero crossing moves on its own — and it "
+            "keeps working when the front splits in two, merges, or forms a "
+            "sharp corner, all of which happen in a real grain and all of "
+            "which would break a model that tracked the surface as a mesh of "
+            "points.",
+
+            "<b>The slice</b> is one flat cut through that 3D field, because a "
+            "volume cannot be drawn on a screen. Pick which way to cut with "
+            "the axis box and where to cut with the slider. The orange line is "
+            "the zero contour — the burning surface itself, and the only line "
+            "here with physical meaning. On a BATES you should see two: the "
+            "bore and the outer wall.",
+
+            "<b>|∇φ| (the gradient magnitude)</b> measures how fast φ changes "
+            "as you step across the grid. For a true distance field it must be "
+            "exactly 1: move 1 mm and the distance to the surface changes by "
+            "1 mm. Anywhere it is not 1, φ is lying about distance — and the "
+            "solver, the timestep and the reinitialisation all assume it is "
+            "telling the truth. That is why this one number is the headline "
+            "check on an import.",
+        ):
+            label = hint(text)
+            label.setTextFormat(Qt.RichText)
+            label.hide()
+            self._help_widgets.append(label)
+            strip_layout.addWidget(label)
+
         self.banner = Banner()
         strip_layout.addWidget(self.banner)
 
         self.metrics = MetricGrid(5)
         self.metrics.add(
-            "grad", "grad mean",
+            "grad", "|∇φ| mean",
             "The defining property of a signed distance field. Should be 1.",
         )
         self.metrics.add(
-            "spread", "grad spread",
+            "spread", "|∇φ| spread",
             "Standard deviation in the band. Large means the field is not a "
             "clean distance function.",
         )
@@ -893,8 +951,8 @@ class FieldView(QWidget):
         layout.addWidget(self._canvas, 1)
 
         self._empty = QLabel(
-            "Open a mesh, then press Build phi.\n\n"
-            "mesh  ->  winding-number sign  ->  closest-point distance  ->  phi"
+            "Open a mesh, then press Build φ.\n\n"
+            "mesh  →  winding-number sign  →  closest-point distance  →  φ"
         )
         self._empty.setAlignment(Qt.AlignCenter)
         self._empty.setStyleSheet(
@@ -910,7 +968,7 @@ class FieldView(QWidget):
         self._caption = QLabel(
             "The dark seam midway through the web is the medial axis, where "
             "the nearest surface switches from the bore to the outer wall. "
-            "|grad phi| is genuinely undefined on it, so this is what a correct "
+            "|∇φ| is genuinely undefined on it, so this is what a correct "
             "field looks like — not a defect. The diagnostic above ignores it, "
             "measuring only the band around the surface, which is the only "
             "region the solver evaluates."
@@ -923,6 +981,61 @@ class FieldView(QWidget):
         layout.addWidget(self._caption)
 
     # -- state -------------------------------------------------------------
+
+    def _set_help_visible(self, visible: bool) -> None:
+        for label in self._help_widgets:
+            label.setVisible(visible)
+
+    def set_units(self, units: str) -> None:
+        """Follow the app-wide unit choice (part of #154).
+
+        Every length on this tab is converted here, at the display edge: the
+        slice position, both axis scales, and the φ colour bar. The field
+        itself stays in metres, so switching units can never change a result --
+        only how it is written down.
+
+        |∇φ| is deliberately *not* converted. It is a ratio of a length to a
+        length, so it is dimensionless and equals 1 in any unit system; giving
+        it a unit would be wrong, not just noisy.
+        """
+        if units not in ("mm", "in"):
+            return
+        self._units = units
+        self._redraw()
+
+    def _to_display(self, values):
+        """Metres to the current display unit."""
+        return values / 0.0254 if self._units == "in" else values * 1000.0
+
+    def set_estimate(self, seconds: float | None) -> None:
+        """Show how long a build will take, before it is started.
+
+        The cost is ``O(cells x triangles)`` and cubic in resolution, so the
+        difference between a two-second build and a twenty-minute one is two
+        notches on a slider in another panel. Putting the number on the button
+        makes that visible at the moment of deciding, rather than after
+        committing to it.
+        """
+        if seconds is None:
+            self.build_button.setText("Build φ")
+            self.build_button.setToolTip(
+                "Run the mesh through the winding-number sign field and "
+                "closest-point distance. Open a mesh first."
+            )
+            return
+
+        if seconds >= 60:
+            pretty = f"~{seconds / 60:.0f} min"
+        elif seconds >= 1:
+            pretty = f"~{seconds:.0f} s"
+        else:
+            pretty = "<1 s"
+        self.build_button.setText(f"Build φ   {pretty}")
+        self.build_button.setToolTip(
+            f"Estimated {pretty} at the resolution set in the Geometry panel. "
+            "Cost grows with the cube of resolution and linearly with triangle "
+            "count, so one notch up the slider is 8x the work."
+        )
 
     def set_mesh_available(self, available: bool) -> None:
         self.build_button.setEnabled(available)
@@ -953,14 +1066,14 @@ class FieldView(QWidget):
         deviation = abs(stats["grad_mean"] - 1.0)
         if deviation < 0.02 and stats["grad_std"] < 0.05:
             self.banner.show_message(
-                f"|grad phi| = {stats['grad_mean']:.4f} near the surface. This "
+                f"|∇φ| = {stats['grad_mean']:.4f} near the surface. This "
                 "is a valid signed distance field — the import produced "
                 "geometry the solver can integrate.",
                 "ok",
             )
         else:
             self.banner.show_message(
-                f"|grad phi| = {stats['grad_mean']:.4f} (spread "
+                f"|∇φ| = {stats['grad_mean']:.4f} (spread "
                 f"{stats['grad_std']:.4f}) is off 1. The Godunov scheme, the "
                 "CFL timestep and reinitialization all assume it is 1, so this "
                 "field will not integrate cleanly.",
@@ -1007,7 +1120,7 @@ class FieldView(QWidget):
         axes.axvline(1.0, color=theme.OK, linewidth=1.2, linestyle="--")
         outside = float((np.abs(values - 1.0) > 0.1).mean())
         axes.set_title(
-            f"|grad phi| near the surface — {outside:.1%} outside ±10%",
+            f"|∇φ| near the surface — {outside:.1%} outside ±10%",
             color=theme.TEXT_MUTED, fontsize=9,
         )
         axes.set_yticks([])
@@ -1029,13 +1142,17 @@ class FieldView(QWidget):
 
         field = np.take(self._phi, index, axis=axis)
         position = float(np.take(self._coords[axis], index, axis=axis).flat[0])
-        self.slice_readout.setText(f"{position * 1000:.1f} mm")
+        self.slice_readout.setText(
+            f"{self._to_display(position):.3f} in"
+            if self._units == "in"
+            else f"{self._to_display(position):.1f} mm"
+        )
 
         # The two in-plane axes, in tensor order, so the picture is not
         # transposed relative to the 3D view.
         plane = [i for i in range(3) if i != axis]
-        horizontal = np.take(self._coords[plane[0]], index, axis=axis)
-        vertical = np.take(self._coords[plane[1]], index, axis=axis)
+        horizontal = self._to_display(np.take(self._coords[plane[0]], index, axis=axis))
+        vertical = self._to_display(np.take(self._coords[plane[1]], index, axis=axis))
 
         # Rebuilt from scratch each time rather than cleared in place: the two
         # modes need different figure layouts (the gradient view adds a
@@ -1064,14 +1181,15 @@ class FieldView(QWidget):
                 horizontal, vertical, magnitude,
                 cmap="magma", vmin=0.8, vmax=1.2, shading="auto",
             )
-            label = "|grad phi|"
+            label = "|∇φ|"
         else:
-            limit = float(np.abs(field).max()) or 1.0
+            shown = self._to_display(field)
+            limit = float(np.abs(shown).max()) or 1.0
             mesh = self._axes.pcolormesh(
-                horizontal, vertical, field,
+                horizontal, vertical, shown,
                 cmap="RdBu_r", vmin=-limit, vmax=limit, shading="auto",
             )
-            label = "phi  (m)"
+            label = f"φ  ({self._units})"
 
         self._colorbar = self._figure.colorbar(mesh, ax=self._axes)
         self._colorbar.set_label(label, color=theme.TEXT_MUTED)
@@ -1090,14 +1208,18 @@ class FieldView(QWidget):
         # this picture with physical meaning.
         if field.min() < 0.0 < field.max():
             self._axes.contour(
-                horizontal, vertical, field, levels=[0.0],
+                horizontal, vertical, self._to_display(field), levels=[0.0],
                 colors=[theme.ACCENT], linewidths=1.6,
             )
 
         self._axes.set_aspect("equal")
         names = "XYZ"
-        self._axes.set_xlabel(f"{names[plane[0]]} (m)", color=theme.TEXT_MUTED)
-        self._axes.set_ylabel(f"{names[plane[1]]} (m)", color=theme.TEXT_MUTED)
+        self._axes.set_xlabel(
+            f"{names[plane[0]]} ({self._units})", color=theme.TEXT_MUTED
+        )
+        self._axes.set_ylabel(
+            f"{names[plane[1]]} ({self._units})", color=theme.TEXT_MUTED
+        )
         self._axes.tick_params(colors=theme.TEXT_MUTED, labelsize=8)
         for spine in self._axes.spines.values():
             spine.set_color(theme.BORDER)

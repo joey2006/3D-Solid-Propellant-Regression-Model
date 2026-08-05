@@ -152,6 +152,7 @@ class MainWindow(QMainWindow):
         units = str(self._settings.value("units", "in"))
         self.measurements_panel.set_units(units, notify=False)
         self.mesh_view.set_units(units)
+        self.field_view.set_units(units)
 
         self._docks: dict[str, QDockWidget] = {}
         self._add_dock("Geometry", self.geometry_panel, Qt.LeftDockWidgetArea)
@@ -564,6 +565,7 @@ class MainWindow(QMainWindow):
         """One unit choice drives the whole window, not just one panel."""
         self._settings.setValue("units", units)
         self.mesh_view.set_units(units)
+        self.field_view.set_units(units)
 
     def _refresh_measurements(self) -> None:
         """Recompute grain dimensions for the current mesh and density."""
@@ -595,6 +597,7 @@ class MainWindow(QMainWindow):
             view.grid.set("spacing", "--")
             view.grid.set("across", "--")
             view.grid.set("cost", "--")
+            self.field_view.set_estimate(None)
             return
 
         _, h = grid_for_mesh(
@@ -614,6 +617,11 @@ class MainWindow(QMainWindow):
             view.grid.set("cost", f"{cost:.0f} s", "warn")
         else:
             view.grid.set("cost", f"{cost:.1f} s", "ok")
+
+        # The same estimate, put where the decision is actually made.
+        # Reading it off a tile on another tab requires already knowing
+        # to look; on the button it is unavoidable.
+        self.field_view.set_estimate(cost)
 
     # -- Recent files ------------------------------------------------------
 
