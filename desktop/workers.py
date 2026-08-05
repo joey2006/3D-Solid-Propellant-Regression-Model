@@ -24,6 +24,79 @@ from srm_burnback.geometry.import_mesh import (
 )
 
 
+class PhiWorker(QObject):
+    """Build φ from a mesh off the UI thread (#158, #175).
+
+    Genuinely slow work, not defensive threading: the winding number is
+    ``O(cells x triangles)``, so 128³ against a 5k-face mesh is ~10^9
+    point-primitive pairs. Seconds on a GPU, minutes on a CPU.
+    """
+
+    #: Emitted with ``(phi, coords, h, stats)`` on success.
+    finished = Signal(object, object, float, object)
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, mesh, resolution: int, margin: float, device: str):
+        super().__init__()
+        self._mesh = mesh
+        self._resolution = int(resolution)
+        self._margin = float(margin)
+        self._device = device
+
+    def run(self) -> None:
+        try:
+            import time
+
+            import torch
+
+            from srm_burnback.geometry.import_mesh import grid_for_mesh
+            from srm_burnback.geometry.winding_number import phi_from_mesh
+
+            self.progress.emit(
+                f"Building {self._resolution}³ grid around the mesh..."
+            )
+            coords, h = grid_for_mesh(
+                self._mesh, self._resolution, self._margin, device=self._device
+            )
+
+            self.progress.emit(
+                f"Computing φ over {self._resolution ** 3:,} points "
+                f"× {len(self._mesh.faces):,} triangles..."
+            )
+            started = time.time()
+            phi = phi_from_mesh(coords, self._mesh)
+            if self._device == "cuda":
+                torch.cuda.synchronize()
+            elapsed = time.time() - started
+
+            # |grad phi| = 1 is the defining property of a signed distance
+            # field, and every downstream scheme assumes it. Measured in a
+            # narrow band around the surface, because that is the only place
+            # the solver ever evaluates it -- far from the interface the field
+            # is unused and its gradient does not matter.
+            gradients = torch.gradient(phi, spacing=h)
+            magnitude = torch.sqrt(sum(g**2 for g in gradients))
+            band = phi.abs() < 3 * h
+            in_band = magnitude[band]
+
+            stats = {
+                "seconds": elapsed,
+                "grad_mean": float(in_band.mean()),
+                "grad_std": float(in_band.std()),
+                "grad_within_1pct": float(
+                    ((in_band - 1.0).abs() < 0.01).float().mean()
+                ),
+                "band_cells": int(band.sum()),
+                "solid_fraction": float((phi < 0).float().mean()),
+                "phi_min": float(phi.min()),
+                "phi_max": float(phi.max()),
+            }
+            self.finished.emit(phi, coords, h, stats)
+        except Exception as exc:
+            self.failed.emit(f"Could not build φ: {exc}")
+
+
 class MeshLoadWorker(QObject):
     """Load and characterise a mesh file off the UI thread."""
 

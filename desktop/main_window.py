@@ -46,7 +46,7 @@ from .panels import (
     SimulationPanel,
 )
 from .views import FieldView, MeshDataView, MeshView
-from .workers import MeshLoadWorker
+from .workers import MeshLoadWorker, PhiWorker
 
 ORG = "SRM Burnback"
 APP = "Burnback Studio"
@@ -65,6 +65,11 @@ class MainWindow(QMainWindow):
         self._thread: QThread | None = None
         self._worker: MeshLoadWorker | None = None
         self._settings = QSettings(ORG, APP)
+
+        # Dropping a file on the window is the shortest path from "I have a
+        # grain" to "I can see it" (#140). The file dialog stays, since
+        # drag-and-drop is undiscoverable on its own.
+        self.setAcceptDrops(True)
 
         self._build_views()
         self._build_docks()
@@ -87,7 +92,47 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.mesh_view, "3D View")
         self.tabs.addTab(self.data_view, "Mesh Data")
         self.tabs.addTab(self.field_view, "Signed Distance Field")
+        self.field_view.build_requested.connect(self.build_field)
         self.setCentralWidget(self.tabs)
+
+    # -- Drag and drop (#140) ----------------------------------------------
+
+    def _dropped_path(self, event) -> Path | None:
+        """The first supported local file in a drag, or ``None``.
+
+        Accepting only recognised suffixes means the cursor shows "no entry"
+        over a PDF instead of accepting the drop and then failing with a
+        dialog -- the rejection happens while the user still has the file in
+        hand, which is where it is useful.
+        """
+        if not event.mimeData().hasUrls():
+            return None
+        for url in event.mimeData().urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            suffix = path.suffix.lower()
+            if suffix in SUPPORTED_SUFFIXES or suffix in NATIVE_CAD_FORMATS:
+                return path
+        return None
+
+    def dragEnterEvent(self, event):  # noqa: N802 - Qt naming
+        if self._dropped_path(event) is not None:
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):  # noqa: N802 - Qt naming
+        if self._dropped_path(event) is not None:
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):  # noqa: N802 - Qt naming
+        path = self._dropped_path(event)
+        if path is None:
+            return
+        event.acceptProposedAction()
+        # Native CAD formats are matched above so the drop is accepted and the
+        # loader can explain which menu item exports a neutral format. Silently
+        # refusing the drop would leave the user with no idea why.
+        self.load_path(path)
 
     def _build_docks(self) -> None:
         self.geometry_panel = GeometryPanel()
@@ -334,6 +379,9 @@ class MainWindow(QMainWindow):
         self.geometry_panel.select_recent(str(self._path))
 
         self.mesh_view.show_mesh(mesh)
+        # A new mesh invalidates any phi built from the previous one.
+        self.field_view.clear()
+        self.field_view.set_mesh_available(True)
         self._populate_data_view()
         self._refresh_measurements()
         self._refresh_grid_metrics()
@@ -346,6 +394,70 @@ class MainWindow(QMainWindow):
         self.status_message.setText("Load failed")
         QMessageBox.warning(self, "Could not open mesh", message)
 
+    # -- Building φ (#158, #175) -------------------------------------------
+
+    def build_field(self) -> None:
+        """Run the mesh through the sign field and distance, off the UI thread."""
+        if self._mesh is None or self._thread is not None:
+            return
+
+        resolution = self.geometry_panel.resolution_points()
+        device = self.geometry_panel.device_string()
+        estimate = estimate_winding_cost(
+            resolution**3, len(self._mesh.faces), device
+        )
+        # The cost is O(cells x triangles) and cubic in resolution, so it is
+        # entirely possible to ask for an hour by nudging a slider. Warning
+        # beforehand is cheaper than a cancel button that has to interrupt a
+        # GPU kernel.
+        if estimate > 30.0:
+            answer = QMessageBox.question(
+                self,
+                "This will take a while",
+                f"Building φ at {resolution}³ against "
+                f"{len(self._mesh.faces):,} triangles is estimated at "
+                f"{estimate / 60:.1f} minutes on the {device.upper()}.\n\n"
+                "Lower the resolution in the Geometry panel to speed it up. "
+                "Continue anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+        self._set_busy(True, "Building φ...")
+        self.field_view.build_button.setEnabled(False)
+
+        self._thread = QThread(self)
+        self._worker = PhiWorker(
+            self._mesh, resolution, self.geometry_panel.margin_value(), device
+        )
+        self._worker.moveToThread(self._thread)
+
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_field_built)
+        self._worker.failed.connect(self._on_field_failed)
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.failed.connect(self._thread.quit)
+        self._thread.finished.connect(self._cleanup_thread)
+
+        self._thread.start()
+
+    def _on_field_built(self, phi, coords, h, stats) -> None:
+        self.field_view.set_field(phi, coords, h, stats)
+        self.field_view.build_button.setEnabled(True)
+        self.tabs.setCurrentWidget(self.field_view)
+        self.status_message.setText(
+            f"φ built in {stats['seconds']:.2f} s — "
+            f"|∇φ| = {stats['grad_mean']:.4f}"
+        )
+
+    def _on_field_failed(self, message: str) -> None:
+        self.field_view.build_button.setEnabled(self._mesh is not None)
+        self.status_message.setText("φ build failed")
+        QMessageBox.warning(self, "Could not build φ", message)
+
     def close_mesh(self) -> None:
         self._mesh = None
         self._stats = None
@@ -355,6 +467,8 @@ class MainWindow(QMainWindow):
         self.close_action.setEnabled(False)
         self.mesh_view.clear()
         self.data_view.clear()
+        self.field_view.clear()
+        self.field_view.set_mesh_available(False)
         self.measurements_panel.clear()
         self._refresh_grid_metrics()
         self.status_message.setText("Ready")

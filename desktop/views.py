@@ -8,7 +8,7 @@ correct-looking mesh points at the sign field, not the importer.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -19,6 +19,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
 
 from . import theme
 from .widgets import Banner, HelpButton, MetricGrid, divider, hint
@@ -747,47 +750,315 @@ class MeshDataView(QWidget):
 
 
 class FieldView(QWidget):
-    """Placeholder for the φ field, pending #158."""
+    """A slice through φ, with the |∇φ| diagnostic (#175).
+
+    This is the panel that answers whether the geometry pipeline actually
+    works. Everything before it is inspectable by eye -- a mesh either looks
+    like a grain or it does not -- but φ is a volumetric field, and a subtly
+    wrong one produces a simulation that runs happily to a wrong answer.
+
+    Two things are shown, and they fail in different ways:
+
+    * **A slice with the zero contour drawn.** Catches sign errors and
+      misplaced surfaces: the contour should trace the bore and the outer wall,
+      with propellant negative and void positive.
+    * **|∇φ| in a band around the surface.** ``|∇φ| = 1`` is the *defining*
+      property of a signed distance field, and the Godunov scheme, the CFL
+      timestep and reinitialization all assume it. Phase 1 only ever verified
+      it on analytically generated fields, where it holds by construction.
+      Here it is measured on real imported geometry -- the case that was never
+      tested.
+    """
+
+    #: Emitted when the user asks for φ to be built.
+    build_requested = Signal()
 
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(40, 40, 40, 40)
-        layout.setSpacing(14)
-        layout.addStretch(1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        title = QLabel("Signed distance field")
-        title.setProperty("role", "heading")
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
+        self._phi = None
+        self._coords = None
+        self._h = 0.0
+        self._axis = 2
+        self._mode = "phi"
+        self._colorbar = None
 
-        body = QLabel(
-            "Not implemented yet — this panel needs φ, which comes from "
-            "issue #158.\n\n"
-            "Once it lands, this shows a slice through the volumetric field "
-            "with the zero contour drawn, plus the |∇φ| diagnostic that says "
-            "whether the import produced a valid signed distance field.\n\n"
-            "|∇φ| ≈ 1 is the headline check: it is the defining property of a "
-            "signed distance field, and every downstream numerical method "
-            "assumes it holds."
+        # --- toolbar ------------------------------------------------------
+        bar = QWidget()
+        bar.setStyleSheet(f"background:{theme.BG_BASE};")
+        bar_layout = QHBoxLayout(bar)
+        bar_layout.setContentsMargins(10, 7, 10, 7)
+        bar_layout.setSpacing(6)
+
+        self.build_button = QPushButton("Build phi")
+        self.build_button.setProperty("accent", True)
+        self.build_button.setEnabled(False)
+        self.build_button.setToolTip(
+            "Run the mesh through the winding-number sign field and "
+            "closest-point distance, at the resolution set in the Geometry "
+            "panel."
         )
-        body.setAlignment(Qt.AlignCenter)
-        body.setWordWrap(True)
-        body.setMaximumWidth(560)
-        body.setStyleSheet(f"color:{theme.TEXT_MUTED}; font-size:13px;")
+        self.build_button.clicked.connect(self.build_requested)
+        bar_layout.addWidget(self.build_button)
 
-        row = QHBoxLayout()
-        row.addStretch(1)
-        row.addWidget(body)
-        row.addStretch(1)
-        layout.addLayout(row)
+        self._mode_buttons = {}
+        for code, text, tip in (
+            ("phi", "phi", "The signed distance field itself, with the zero "
+                           "contour drawn. Blue is propellant, red is void."),
+            ("grad", "|grad phi|", "How far the field is from a true signed "
+                                   "distance. Should be 1 near the surface."),
+        ):
+            button = QPushButton(text)
+            button.setCheckable(True)
+            button.setToolTip(tip)
+            button.clicked.connect(lambda _=False, c=code: self.set_mode(c))
+            bar_layout.addWidget(button)
+            self._mode_buttons[code] = button
+        self._mode_buttons["phi"].setChecked(True)
 
-        pipeline = QLabel(
-            "mesh  →  winding-number sign  →  closest-point distance  →  φ"
+        bar_layout.addStretch(1)
+
+        self.axis_combo = QComboBox()
+        self.axis_combo.addItems(["Slice along Z", "Slice along X", "Slice along Y"])
+        self.axis_combo.setFixedWidth(124)
+        self.axis_combo.currentIndexChanged.connect(self._on_axis)
+        bar_layout.addWidget(self.axis_combo)
+
+        self.slice_slider = QSlider(Qt.Horizontal)
+        self.slice_slider.setRange(0, 100)
+        self.slice_slider.setValue(50)
+        self.slice_slider.setFixedWidth(200)
+        self.slice_slider.setToolTip("Where along the axis to cut the slice.")
+        self.slice_slider.valueChanged.connect(self._redraw)
+        bar_layout.addWidget(self.slice_slider)
+
+        self.slice_readout = QLabel("--")
+        self.slice_readout.setFixedWidth(92)
+        self.slice_readout.setStyleSheet(
+            f"color:{theme.TEXT_MUTED}; font-family:{theme.FONT_MONO};"
+            "font-size:12px;"
         )
-        pipeline.setAlignment(Qt.AlignCenter)
-        pipeline.setStyleSheet(
-            f"color:{theme.ACCENT}; font-family:{theme.FONT_MONO}; font-size:12px;"
+        bar_layout.addWidget(self.slice_readout)
+
+        layout.addWidget(bar)
+        layout.addWidget(divider())
+
+        # --- diagnostics --------------------------------------------------
+        strip = QWidget()
+        strip.setStyleSheet(f"background:{theme.BG_BASE};")
+        strip_layout = QVBoxLayout(strip)
+        strip_layout.setContentsMargins(14, 10, 14, 12)
+        strip_layout.setSpacing(8)
+
+        self.banner = Banner()
+        strip_layout.addWidget(self.banner)
+
+        self.metrics = MetricGrid(5)
+        self.metrics.add(
+            "grad", "grad mean",
+            "The defining property of a signed distance field. Should be 1.",
         )
-        layout.addWidget(pipeline)
-        layout.addStretch(2)
+        self.metrics.add(
+            "spread", "grad spread",
+            "Standard deviation in the band. Large means the field is not a "
+            "clean distance function.",
+        )
+        self.metrics.add(
+            "within", "Within 1%",
+            "Share of near-surface cells whose gradient is within 1% of 1.",
+        )
+        self.metrics.add(
+            "solid", "Solid cells",
+            "Share of the domain the sign field calls propellant. Compare it "
+            "against the port fraction in Measurements.",
+        )
+        self.metrics.add("time", "Build time")
+        strip_layout.addWidget(self.metrics)
+
+        layout.addWidget(strip)
+        layout.addWidget(divider())
+
+        # --- canvas -------------------------------------------------------
+        self._figure = Figure(figsize=(6, 5), facecolor=theme.VIEW_BG)
+        self._canvas = FigureCanvasQTAgg(self._figure)
+        self._axes = self._figure.add_subplot(111)
+        layout.addWidget(self._canvas, 1)
+
+        self._empty = QLabel(
+            "Open a mesh, then press Build phi.\n\n"
+            "mesh  ->  winding-number sign  ->  closest-point distance  ->  phi"
+        )
+        self._empty.setAlignment(Qt.AlignCenter)
+        self._empty.setStyleSheet(
+            f"color:{theme.TEXT_FAINT}; font-size:13px; padding:30px;"
+        )
+        layout.addWidget(self._empty, 1)
+        self._canvas.hide()
+
+        # Shown only in gradient mode. A correct signed distance field has a
+        # dark seam running down the middle of the web, and it looks exactly
+        # like a defect unless it is named -- so name it, rather than let the
+        # user distrust a good import.
+        self._caption = QLabel(
+            "The dark seam midway through the web is the medial axis, where "
+            "the nearest surface switches from the bore to the outer wall. "
+            "|grad phi| is genuinely undefined on it, so this is what a correct "
+            "field looks like — not a defect. The diagnostic above ignores it, "
+            "measuring only the band around the surface, which is the only "
+            "region the solver evaluates."
+        )
+        self._caption.setWordWrap(True)
+        self._caption.setStyleSheet(
+            f"color:{theme.TEXT_FAINT}; font-size:11px; padding:6px 16px 10px;"
+        )
+        self._caption.hide()
+        layout.addWidget(self._caption)
+
+    # -- state -------------------------------------------------------------
+
+    def set_mesh_available(self, available: bool) -> None:
+        self.build_button.setEnabled(available)
+
+    def set_field(self, phi, coords, h: float, stats: dict) -> None:
+        """Take a freshly built field and show it."""
+        self._phi = phi.detach().to("cpu").numpy()
+        self._coords = [c.detach().to("cpu").numpy() for c in coords]
+        self._h = h
+
+        self.metrics.set(
+            "grad", f"{stats['grad_mean']:.4f}",
+            "ok" if abs(stats["grad_mean"] - 1.0) < 0.02 else "warn",
+        )
+        self.metrics.set(
+            "spread", f"{stats['grad_std']:.4f}",
+            "ok" if stats["grad_std"] < 0.05 else "warn",
+        )
+        self.metrics.set(
+            "within", f"{stats['grad_within_1pct']:.1%}",
+            "ok" if stats["grad_within_1pct"] > 0.8 else "warn",
+        )
+        self.metrics.set("solid", f"{stats['solid_fraction']:.1%}")
+        self.metrics.set("time", f"{stats['seconds']:.2f} s")
+
+        # The verdict, stated rather than left to be inferred from four
+        # numbers. This panel exists to answer one question.
+        deviation = abs(stats["grad_mean"] - 1.0)
+        if deviation < 0.02 and stats["grad_std"] < 0.05:
+            self.banner.show_message(
+                f"|grad phi| = {stats['grad_mean']:.4f} near the surface. This "
+                "is a valid signed distance field — the import produced "
+                "geometry the solver can integrate.",
+                "ok",
+            )
+        else:
+            self.banner.show_message(
+                f"|grad phi| = {stats['grad_mean']:.4f} (spread "
+                f"{stats['grad_std']:.4f}) is off 1. The Godunov scheme, the "
+                "CFL timestep and reinitialization all assume it is 1, so this "
+                "field will not integrate cleanly.",
+                "warn",
+            )
+
+        self._empty.hide()
+        self._canvas.show()
+        self._redraw()
+
+    def clear(self) -> None:
+        self._phi = None
+        self._coords = None
+        self.banner.hide()
+        self.metrics.reset()
+        self._canvas.hide()
+        self._caption.hide()
+        self._empty.show()
+        self.slice_readout.setText("--")
+
+    def set_mode(self, mode: str) -> None:
+        self._mode = mode
+        for code, button in self._mode_buttons.items():
+            button.setChecked(code == mode)
+        self._caption.setVisible(mode == "grad" and self._phi is not None)
+        self._redraw()
+
+    def _on_axis(self, index: int) -> None:
+        # Combo order is Z, X, Y; tensor axes are X, Y, Z.
+        self._axis = (2, 0, 1)[index]
+        self._redraw()
+
+    # -- drawing -----------------------------------------------------------
+
+    def _redraw(self) -> None:
+        if self._phi is None:
+            return
+        import numpy as np
+
+        axis = self._axis
+        count = self._phi.shape[axis]
+        index = min(
+            count - 1,
+            max(0, round(self.slice_slider.value() / 100 * (count - 1))),
+        )
+
+        field = np.take(self._phi, index, axis=axis)
+        position = float(np.take(self._coords[axis], index, axis=axis).flat[0])
+        self.slice_readout.setText(f"{position * 1000:.1f} mm")
+
+        # The two in-plane axes, in tensor order, so the picture is not
+        # transposed relative to the 3D view.
+        plane = [i for i in range(3) if i != axis]
+        horizontal = np.take(self._coords[plane[0]], index, axis=axis)
+        vertical = np.take(self._coords[plane[1]], index, axis=axis)
+
+        # A colorbar adds a new axes to the figure every time, so the old one
+        # is removed rather than left to stack up across redraws -- the slider
+        # fires this on every tick.
+        if self._colorbar is not None:
+            self._colorbar.remove()
+            self._colorbar = None
+        self._axes.clear()
+        self._axes.set_facecolor(theme.VIEW_BG)
+
+        if self._mode == "grad":
+            gradients = np.gradient(field, self._h)
+            magnitude = np.sqrt(sum(g**2 for g in gradients))
+            # Fixed 0.8-1.2 window: this is a deviation plot, so the question
+            # is "how far from 1", and an autoscaled range would hide that by
+            # making any field look uniform.
+            mesh = self._axes.pcolormesh(
+                horizontal, vertical, magnitude,
+                cmap="magma", vmin=0.8, vmax=1.2, shading="auto",
+            )
+            label = "|grad phi|"
+        else:
+            limit = float(np.abs(field).max()) or 1.0
+            mesh = self._axes.pcolormesh(
+                horizontal, vertical, field,
+                cmap="RdBu_r", vmin=-limit, vmax=limit, shading="auto",
+            )
+            label = "phi  (m)"
+
+        self._colorbar = self._figure.colorbar(mesh, ax=self._axes)
+        self._colorbar.set_label(label, color=theme.TEXT_MUTED)
+        self._colorbar.ax.tick_params(colors=theme.TEXT_MUTED, labelsize=8)
+
+        # The zero contour is the burning surface itself -- the one line in
+        # this picture with physical meaning.
+        if field.min() < 0.0 < field.max():
+            self._axes.contour(
+                horizontal, vertical, field, levels=[0.0],
+                colors=[theme.ACCENT], linewidths=1.6,
+            )
+
+        self._axes.set_aspect("equal")
+        names = "XYZ"
+        self._axes.set_xlabel(f"{names[plane[0]]} (m)", color=theme.TEXT_MUTED)
+        self._axes.set_ylabel(f"{names[plane[1]]} (m)", color=theme.TEXT_MUTED)
+        self._axes.tick_params(colors=theme.TEXT_MUTED, labelsize=8)
+        for spine in self._axes.spines.values():
+            spine.set_color(theme.BORDER)
+
+        self._figure.tight_layout()
+        self._canvas.draw_idle()
