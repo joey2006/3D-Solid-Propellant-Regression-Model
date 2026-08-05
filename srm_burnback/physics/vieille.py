@@ -25,8 +25,12 @@ class VieilleBurnRate(BurnRateModel):
     Parameters
     ----------
     a:
-        Burn-rate coefficient (units: length/time/pressure^n). For a composite
-        propellant in SI, ``a ~ 0.005 m/s/Pa^n``.
+        Burn-rate coefficient (units: length/time/pressure^n). The law is
+        unit-agnostic -- ``a`` and ``P`` only have to agree -- but the
+        tabulated values are quoted in the **MPa** convention: ``a ~ 0.005``
+        with ``P`` in MPa yields metres per second -- the familiar 5 mm/s at
+        1 MPa for a composite. Feed ``P`` in MPa to match published ``a``, not
+        in pascals: at 5 MPa the two differ by 5^n, not by a tidy factor.
     n:
         Pressure exponent, typically 0.3-0.7. Must satisfy stability ``n < 1``
         in a real motor, but the law itself is evaluated for whatever ``n`` is

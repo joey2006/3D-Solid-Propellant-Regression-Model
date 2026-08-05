@@ -18,6 +18,7 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -34,6 +35,7 @@ from srm_burnback.geometry.import_mesh import (
     SUPPORTED_SUFFIXES,
     estimate_winding_cost,
     grid_for_mesh,
+    mesh_stats,
 )
 
 from . import theme
@@ -257,7 +259,70 @@ class MainWindow(QMainWindow):
     def _on_progress(self, message: str) -> None:
         self.status_message.setText(message)
 
+    #: A grain whose largest extent falls outside this range, in metres, is
+    #: almost certainly a unit error rather than an unusual motor. A 5 mm floor
+    #: sits below any real grain; a 10 m ceiling sits above anything this tool
+    #: is for.
+    PLAUSIBLE_EXTENT_M = (5e-3, 10.0)
+
+    def _confirm_units(self, mesh, stats):
+        """Ask what unit an undeclared file was drawn in, when it looks wrong.
+
+        Only STL and friends reach here -- a CAD file declares its unit and is
+        converted on import (#170). For those formats nothing in the file says
+        whether ``50`` means metres or millimetres, so the only evidence is the
+        size itself, and the only reliable judge is the person who drew it.
+
+        The prompt is deliberately conditional on an implausible size rather
+        than shown on every import. A grain that already measures 0.12 m needs
+        no interrogation, and a dialog on every open trains the user to dismiss
+        it -- which is exactly the reflex that lets a real scale error through.
+        """
+        if stats.get("units_origin") != "unknown":
+            return mesh, stats
+
+        low, high = self.PLAUSIBLE_EXTENT_M
+        if low <= stats["max_extent"] <= high:
+            return mesh, stats
+
+        choices = ["millimetres", "centimetres", "inches", "metres (leave as-is)"]
+        factors = {choices[0]: 1e-3, choices[1]: 1e-2, choices[2]: 2.54e-2}
+
+        choice, accepted = QInputDialog.getItem(
+            self,
+            "What unit is this drawn in?",
+            f"'{Path(stats.get('name', '')).name or 'This file'}' measures "
+            f"{stats['max_extent']:,.4g} along its longest axis, which is not a "
+            "plausible motor in metres.\n\n"
+            "Mesh formats carry no unit declaration, so this cannot be read "
+            "from the file. A grain imported at the wrong scale still "
+            "simulates — it simply reports a burn time wrong by orders of "
+            "magnitude.\n\n"
+            "The model was drawn in:",
+            choices,
+            0,
+            False,
+        )
+        if not accepted or choice not in factors:
+            return mesh, stats
+
+        mesh.apply_scale(factors[choice])
+        if isinstance(getattr(mesh, "metadata", None), dict):
+            mesh.metadata["source_units"] = choice
+            mesh.metadata["units_origin"] = "assumed"
+
+        # Extents, volume and area all just changed, so the summary has to be
+        # rebuilt rather than patched. The orientation note is not derived from
+        # geometry and would be lost by a plain recompute.
+        reoriented = stats.get("reoriented_from")
+        stats = mesh_stats(mesh)
+        stats["reoriented_from"] = reoriented
+        return mesh, stats
+
     def _on_loaded(self, mesh, stats, path) -> None:
+        stats = dict(stats, name=str(path))
+        mesh, stats = self._confirm_units(mesh, stats)
+
         self._mesh = mesh
         self._stats = stats
         self._path = Path(path)
@@ -323,6 +388,21 @@ class MainWindow(QMainWindow):
         )
 
         messages = []
+        # The unit is the one import property that cannot be checked by eye
+        # once the geometry is on screen: a grain drawn in millimetres looks
+        # exactly like one drawn in metres. Say which it was, and how the
+        # answer was arrived at (#170).
+        if stats.get("units_origin") == "declared":
+            messages.append(
+                f"Drawn in {stats['source_units']} — the CAD file declares its "
+                "unit, and the geometry has been converted to metres."
+            )
+        elif stats.get("units_origin") == "assumed":
+            messages.append(
+                f"Scaled from {stats['source_units']} to metres as you "
+                "specified. This file declares no unit of its own, so that "
+                "choice is not verifiable from the file."
+            )
         if stats.get("reoriented_from"):
             messages.append(
                 f"This model's long axis was {stats['reoriented_from']}; it has "
@@ -349,12 +429,12 @@ class MainWindow(QMainWindow):
                 "import, since inconsistent winding both mis-shades the "
                 "surface and breaks the inside/outside classification."
             )
-        if stats["max_extent"] > 10.0:
+        if stats["max_extent"] > 10.0 and stats.get("units_origin") != "declared":
             messages.append(
-                "Largest extent exceeds 10. If this grain is in millimetres, "
-                "the simulation works in metres and the geometry is ~1000× too "
-                "large. STL files carry no unit declaration, so this cannot be "
-                "detected automatically."
+                "Largest extent exceeds 10 m, which is not a motor. This file "
+                "declares no unit — if the grain was drawn in millimetres it is "
+                "~1000× too large. Re-open it and state the unit, or import a "
+                "STEP file, which declares its own."
             )
 
         if messages:

@@ -40,10 +40,16 @@ for both: branch on ``len(coords)`` rather than assuming a fixed dimension. The
 
 Units
 -----
-All lengths (radii, lengths, coordinates) must share a single consistent unit.
-The project default for now is **inches**; a metric/imperial toggle will be
-layered on later, so geometries should never bake in a particular unit -- they
-just operate on whatever consistent numbers they are given.
+All lengths (radii, lengths, coordinates) are in **metres**, the project's
+canonical unit -- see :mod:`srm_burnback.geometry.units`, which is the single
+place that is stated. Imports are converted to metres at load time.
+
+Inches appear only in the *display* layer: the measurements panel defaults to
+them because experimental motor work is dimensioned in inches. That is a
+formatting choice applied on the way out, and no stored number is ever in
+inches. Geometries themselves bake in no unit -- they operate on whatever
+consistent numbers they are given -- but everything that hands them numbers
+hands them metres.
 """
 
 from __future__ import annotations

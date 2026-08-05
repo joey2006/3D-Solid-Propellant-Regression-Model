@@ -18,15 +18,20 @@ purely on the volumetric field.
 
 Units
 -----
-Mesh files carry no reliable unit declaration (STL in particular has none), so
-the numbers are taken as-is. ``mesh_stats`` reports the bounding box precisely
-so a unit mismatch is obvious on sight: a grain measuring 50 x 50 x 120 is
-millimetres, while 0.05 x 0.05 x 0.12 is metres.
+The package computes in **metres** throughout (see :mod:`units`), and every
+import lands there.
 
-Native CAD files *do* declare units internally, but the conversion goes through
-OpenCASCADE and lands in millimetres, whereas the simulation works in metres.
-So a STEP grain typically arrives 1000x too large and needs scaling. The extent
-warning is what surfaces this; automatic handling is #170.
+Native CAD files declare their unit internally, and OpenCASCADE reads that
+declaration and emits metres -- so a STEP grain arrives already scaled, whatever
+it was drawn in. :func:`load_mesh` reads the declaration separately to *report*
+which unit that was, and refuses a CAD file that declares none rather than
+guessing.
+
+Mesh files carry no reliable unit declaration (STL in particular has none), so
+their numbers are taken as-is unless the caller states a unit via
+``assume_units``. ``mesh_stats`` reports the bounding box precisely so a
+mismatch is obvious on sight: a grain measuring 50 x 50 x 120 is millimetres,
+while 0.05 x 0.05 x 0.12 is metres.
 
 CAD versus mesh input
 ---------------------
@@ -45,6 +50,7 @@ import torch
 
 from .CoordinateBuilder import build_coords
 from .GrainGeometry import Coords
+from .units import CANONICAL_LENGTH_UNIT, step_length_unit, to_metres
 
 # Extensions trimesh handles that make sense as a grain source.
 MESH_SUFFIXES = {".stl", ".obj", ".ply", ".off", ".glb", ".gltf", ".3mf"}
@@ -85,26 +91,39 @@ class MeshImportError(RuntimeError):
     """Raised when a file cannot be read as a usable triangle mesh."""
 
 
-def load_mesh(path: str | Path):
-    """Read a mesh file into a single ``trimesh.Trimesh``.
+def load_mesh(path: str | Path, assume_units: str | None = None):
+    """Read a mesh file into a single ``trimesh.Trimesh``, in metres.
 
     Parameters
     ----------
     path:
         File to load. Suffix must be one of :data:`SUPPORTED_SUFFIXES`.
+    assume_units:
+        Unit the file's numbers are in, for formats that declare none (STL and
+        friends) -- ``"mm"``, ``"in"``, ``"m"``, and so on. The mesh is scaled
+        to metres accordingly. Omit to take the numbers as-is. Not accepted for
+        CAD files, which declare their own unit; passing it there is refused
+        rather than silently applied on top of the converter's own conversion.
 
     Returns
     -------
     trimesh.Trimesh
-        The loaded mesh. Multi-body scenes are concatenated into one mesh --
-        selecting an individual body is a CAD-format concern (#169), and STL
-        has no body structure to select from in the first place.
+        The loaded mesh, in metres. Multi-body scenes are concatenated into one
+        mesh -- selecting an individual body is a CAD-format concern (#169), and
+        STL has no body structure to select from in the first place.
+
+        ``mesh.metadata`` gains ``source_units`` (the unit the file was drawn
+        in, or ``None`` when unknowable) and ``units_origin``, one of
+        ``"declared"``, ``"assumed"`` or ``"unknown"``, so the UI can show the
+        user what was detected and how much to trust it (#170).
 
     Raises
     ------
     MeshImportError
-        If the suffix is unsupported, the file cannot be parsed, or the result
-        contains no faces.
+        If the suffix is unsupported, the file cannot be parsed, the result
+        contains no faces, or a CAD file declares no length unit -- an
+        undeclared unit is refused rather than guessed, because a wrong guess
+        produces a plausible simulation with a wildly wrong timescale.
     """
     try:
         import trimesh
@@ -138,6 +157,7 @@ def load_mesh(path: str | Path):
             f"unsupported mesh format '{path.suffix}'. Supported: {supported}"
         )
 
+    declared_units: tuple[str, float] | None = None
     if suffix in CAD_SUFFIXES:
         try:
             import cascadio  # noqa: F401  (registers the STEP loader)
@@ -146,6 +166,30 @@ def load_mesh(path: str | Path):
                 f"reading '{path.suffix}' CAD files needs the `cascadio` "
                 "backend. Install it with `pip install cascadio`."
             ) from exc
+
+        if assume_units is not None:
+            raise MeshImportError(
+                f"'{path.name}' declares its own length unit, so "
+                "`assume_units` does not apply to CAD files. Remove it, or "
+                "convert the file to STL first if the declaration is wrong."
+            )
+
+        # Read the declaration before converting. This is cheap -- a text scan
+        # over the unit entities -- and it is the only chance to refuse a file
+        # that states no unit, since the converter will happily produce numbers
+        # either way and nothing downstream could tell they were guessed.
+        declared_units = step_length_unit(path)
+        if declared_units is None:
+            raise MeshImportError(
+                f"'{path.name}' declares no length unit, so its scale cannot "
+                "be established. A grain imported at the wrong scale still "
+                "simulates -- it just reports a burn time that is wrong by "
+                "orders of magnitude -- so the file is refused rather than "
+                "guessed at.\n\n"
+                "Re-export it from your CAD package as AP203 or AP214 STEP, "
+                "which record the unit, or export STL and state the unit on "
+                "import."
+            )
 
     read_from = path
     staged: Path | None = None
@@ -188,7 +232,55 @@ def load_mesh(path: str | Path):
     if getattr(loaded, "faces", None) is None or len(loaded.faces) == 0:
         raise MeshImportError(f"'{path.name}' contains no triangles")
 
-    return loaded
+    if suffix in CAD_SUFFIXES:
+        # The STEP conversion goes out through glTF, which stores vertices
+        # per-face so it can carry per-face normals. Adjacent triangles
+        # therefore arrive with *coincident but separate* vertices -- BATES.stp
+        # loads as 656 vertices for 326 distinct positions -- and a mesh whose
+        # triangles do not share vertices has no shared edges, so trimesh
+        # correctly reports it as open.
+        #
+        # The consequence is not cosmetic: `is_watertight` gates volume, and
+        # volume gates mass and port fraction, so every STEP import showed
+        # blanks for the three numbers a user most wants to check. Merging
+        # coincident vertices restores the topology the CAD model always had.
+        # It is not a repair -- nothing is moved or discarded, only re-indexed.
+        loaded.merge_vertices()
+
+    return _record_units(loaded, declared_units, assume_units)
+
+
+def _record_units(mesh, declared: tuple[str, float] | None, assumed: str | None):
+    """Bring ``mesh`` to metres and record where its unit came from (#170).
+
+    Three cases, and the distinction between them is what the UI reports:
+
+    * **declared** -- a CAD file said what it was drawn in. OpenCASCADE has
+      already applied that conversion, so the geometry needs no scaling here;
+      the name is recorded so the user can confirm it against the part they
+      drew. ``tests/test_units.py`` pins the converter's metres-out behaviour.
+    * **assumed** -- the caller stated a unit for a format that declares none.
+      That is the only case where this function scales anything.
+    * **unknown** -- a mesh file with no declaration and nothing stated. The
+      numbers are taken as-is, which is a guess that metres were intended;
+      ``mesh_stats`` reports the extents so it can be checked by eye.
+    """
+    if assumed is not None:
+        factor = to_metres(assumed)
+        if factor != 1.0:
+            mesh.apply_scale(factor)
+        source, origin = str(assumed).strip().lower(), "assumed"
+    elif declared is not None:
+        source, origin = declared[0], "declared"
+    else:
+        source, origin = None, "unknown"
+
+    metadata = getattr(mesh, "metadata", None)
+    if isinstance(metadata, dict):
+        metadata["source_units"] = source
+        metadata["units_origin"] = origin
+        metadata["units"] = CANONICAL_LENGTH_UNIT
+    return mesh
 
 
 #: Axis names, indexed the way tensors are.
@@ -255,6 +347,9 @@ def mesh_stats(mesh) -> dict:
     * ``n_degenerate`` -- zero-area triangles subtend an undefined solid angle
       and can poison the winding-number sum.
     * ``volume`` -- only meaningful when watertight; ``None`` otherwise.
+    * ``source_units`` / ``units_origin`` -- what unit the file was drawn in
+      and whether that was declared, assumed or unknown (#170). Recorded by
+      :func:`load_mesh`; absent for a mesh built in memory.
 
     Returns
     -------
@@ -270,8 +365,11 @@ def mesh_stats(mesh) -> dict:
 
     bounds = mesh.bounds  # (2, 3): [[xmin, ymin, zmin], [xmax, ymax, zmax]]
     extents = mesh.extents
+    metadata = getattr(mesh, "metadata", None) or {}
 
     return {
+        "source_units": metadata.get("source_units"),
+        "units_origin": metadata.get("units_origin", "unknown"),
         "n_triangles": int(len(mesh.faces)),
         # Inconsistent winding means some faces are inside-out, which both
         # mis-shades them and breaks any inside/outside test based on normals.
