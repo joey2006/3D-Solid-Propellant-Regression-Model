@@ -23,6 +23,13 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme
+from srm_burnback.propellants import (
+    CUSTOM,
+    LIBRARY,
+    Propellant,
+    by_name,
+    matches,
+)
 from srm_burnback.units import (
     format_value,
     from_si,
@@ -303,6 +310,47 @@ class GeometryPanel(QWidget):
         """How the grain's end faces should be treated: burning or inhibited."""
         return self.ends.currentText().lower()
 
+    # -- Restoring a saved design (#155) -----------------------------------
+    #
+    # Each setter blocks signals while it writes, because restoring a design
+    # sets several controls in a row and every one of them would otherwise
+    # emit `changed`. The window issues a single refresh once the whole design
+    # is in place.
+
+    def set_resolution(self, points: int) -> None:
+        """Select the nearest available resolution to ``points``."""
+        if not RESOLUTIONS:
+            return
+        nearest = min(range(len(RESOLUTIONS)),
+                      key=lambda i: abs(RESOLUTIONS[i] - int(points)))
+        self.resolution.blockSignals(True)
+        self.resolution.setValue(nearest)
+        self.resolution.blockSignals(False)
+        self.resolution_value.setText(f"{self.resolution_points()}\u00b3")
+
+    def set_margin(self, margin: float) -> None:
+        self.margin.blockSignals(True)
+        self.margin.setValue(float(margin))
+        self.margin.blockSignals(False)
+
+    def set_device(self, device: str) -> None:
+        """Select CUDA or CPU, falling back when the requested one is absent."""
+        wanted = "CUDA" if str(device).lower().startswith("cuda") else "CPU"
+        for index in range(self.device.count()):
+            if self.device.itemText(index).startswith(wanted):
+                self.device.blockSignals(True)
+                self.device.setCurrentIndex(index)
+                self.device.blockSignals(False)
+                return
+        # A design saved on a GPU machine, reopened on one without: keep
+        # whatever is available rather than refusing to load the design.
+
+    def set_ends(self, ends: str) -> None:
+        text = "Burning" if str(ends).lower() == "burning" else "Inhibited"
+        self.ends.blockSignals(True)
+        self.ends.setCurrentText(text)
+        self.ends.blockSignals(False)
+
     def set_file(self, name: str | None) -> None:
         if name:
             self.file_label.setText(name)
@@ -333,12 +381,38 @@ class PropellantPanel(QWidget):
         vieille_layout = QVBoxLayout(vieille_box)
         vieille_layout.setSpacing(8)
 
+        # Named propellants (#152). Naming the choice makes it reviewable:
+        # "KNSB" can be checked at a glance in a way that a = 0.00513 cannot.
+        self.propellant = QComboBox()
+        self.propellant.addItems([p.name for p in LIBRARY] + [CUSTOM])
+        self.propellant.setToolTip(
+            "Published reference values — a starting point, not a "
+            "characterisation of your batch. Replace them with your own static "
+            "test data before flying anything."
+        )
+        self.propellant.activated.connect(self._on_propellant_picked)
+        vieille_layout.addWidget(FieldRow("Propellant", self.propellant))
+        vieille_layout.addWidget(
+            vieille_box.add_help(
+                "Picks a known propellant's burn-rate coefficients and density "
+                "in one step. Editing any of the three numbers switches this "
+                "to <i>Custom</i>, so the name can never claim something the "
+                "values no longer match.<br><br>"
+                "<b>These are published starting points, not your propellant.</b> "
+                "Burn rate depends on oxidiser particle size, binder ratio, "
+                "cure and mixing, so a static test is the only thing that says "
+                "how your batch actually burns. The error matters: chamber "
+                "pressure goes as a^(1/(1-n)), so 10% off in <i>a</i> is about "
+                "15% off in pressure at n = 0.35."
+            )
+        )
+
         self.a = QDoubleSpinBox()
         self.a.setRange(0.0001, 1.0)
         self.a.setDecimals(5)
         self.a.setSingleStep(0.001)
         self.a.setValue(0.005)
-        self.a.valueChanged.connect(self.changed)
+        self.a.valueChanged.connect(self._on_coefficient_changed)
         vieille_layout.addWidget(
             FieldRow(
                 "Coefficient a",
@@ -353,7 +427,7 @@ class PropellantPanel(QWidget):
         self.n.setDecimals(3)
         self.n.setSingleStep(0.01)
         self.n.setValue(0.35)
-        self.n.valueChanged.connect(self.changed)
+        self.n.valueChanged.connect(self._on_coefficient_changed)
         vieille_layout.addWidget(
             FieldRow("Exponent n", self.n, "Pressure exponent. n ≥ 1 is unstable.")
         )
@@ -427,6 +501,69 @@ class PropellantPanel(QWidget):
         layout.addWidget(erosive_box)
         layout.addStretch(1)
 
+    # -- Propellant library (#152) -----------------------------------------
+
+    def _on_propellant_picked(self, index: int) -> None:
+        """Load a named propellant's numbers into the three inputs."""
+        chosen = by_name(self.propellant.itemText(index))
+        if chosen is None:      # "Custom" -- leave the values alone
+            return
+        for widget, value in (
+            (self.a, chosen.a),
+            (self.n, chosen.n),
+        ):
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
+        self._density_si = chosen.density
+        self._apply_density_units()
+        self.changed.emit()
+
+    def _sync_propellant_name(self) -> None:
+        """Show ``Custom`` once the numbers stop matching the named propellant.
+
+        A label that keeps saying "KNSB" after the coefficients have been
+        edited is worse than no label: it is a claim about what is loaded, and
+        it would be false.
+        """
+        current = self.propellant.currentText()
+        chosen = by_name(current)
+        if chosen is None:
+            return
+        if not matches(chosen, self.a.value(), self.n.value(), self._density_si):
+            self.propellant.setCurrentText(CUSTOM)
+
+    def set_propellant(
+        self, name: str, a: float, n: float, density: float
+    ) -> None:
+        """Restore a saved propellant, values first and the name after.
+
+        The name is set last and only if the numbers still match it, so a
+        design whose coefficients were hand-edited reopens as *Custom* rather
+        than claiming a library propellant it no longer is.
+        """
+        for widget, value in ((self.a, a), (self.n, n)):
+            widget.blockSignals(True)
+            widget.setValue(float(value))
+            widget.blockSignals(False)
+        self._density_si = float(density)
+        self._apply_density_units()
+
+        known = by_name(name)
+        fits = known is not None and matches(known, float(a), float(n), float(density))
+        self.propellant.blockSignals(True)
+        self.propellant.setCurrentText(name if fits else CUSTOM)
+        self.propellant.blockSignals(False)
+
+    def propellant_value(self) -> Propellant:
+        """The current coefficients, named if they match a library entry."""
+        return Propellant(
+            name=self.propellant.currentText(),
+            a=float(self.a.value()),
+            n=float(self.n.value()),
+            density=self._density_si,
+        )
+
     # -- Units (#154) ------------------------------------------------------
 
     def set_units(self, units: str) -> None:
@@ -466,6 +603,11 @@ class PropellantPanel(QWidget):
         self._density_si = to_si(
             shown, "density", units_for("density", self._units)
         )
+        self._sync_propellant_name()
+        self.changed.emit()
+
+    def _on_coefficient_changed(self, _value: float) -> None:
+        self._sync_propellant_name()
         self.changed.emit()
 
     def density_value(self) -> float:

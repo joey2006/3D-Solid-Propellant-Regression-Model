@@ -46,11 +46,16 @@ from .panels import (
     SimulationPanel,
 )
 from .views import FieldView, MeshDataView, MeshView
+from .design import SUFFIX, Design, DesignError
 from .workers import MeshLoadWorker, PhiWorker
 
 ORG = "SRM Burnback"
 APP = "Burnback Studio"
 MAX_RECENT = 8
+
+#: How many settings changes undo remembers. Snapshots are a few hundred
+#: bytes each, so the limit is about menu sanity rather than memory.
+UNDO_DEPTH = 64
 
 
 class MainWindow(QMainWindow):
@@ -65,6 +70,12 @@ class MainWindow(QMainWindow):
         self._thread: QThread | None = None
         self._worker: MeshLoadWorker | None = None
         self._settings = QSettings(ORG, APP)
+        self._design_path: Path | None = None
+        # Guards the undo recorder while a design is being restored, so one
+        # restore is one undo step rather than one per control.
+        self._applying = False
+        self._undo_stack: list[str] = []
+        self._redo_stack: list[str] = []
 
         # Dropping a file on the window is the shortest path from "I have a
         # grain" to "I can see it" (#140). The file dialog stays, since
@@ -78,6 +89,9 @@ class MainWindow(QMainWindow):
 
         self._restore_layout()
         self._refresh_grid_metrics()
+        # The opening state is the floor of the undo stack, so the first undo
+        # returns here rather than to nothing.
+        self._push_undo(initial=True)
 
     # -- Construction ------------------------------------------------------
 
@@ -145,6 +159,10 @@ class MainWindow(QMainWindow):
             lambda p: self.load_path(Path(p))
         )
         self.geometry_panel.changed.connect(self._refresh_grid_metrics)
+        # Every settings change is an undo point (#156).
+        self.geometry_panel.changed.connect(self._push_undo)
+        self.propellant_panel.changed.connect(self._push_undo)
+        self.measurements_panel.units_changed.connect(lambda _u: self._push_undo())
         # The 3D view shows which faces burn, so it has to follow the End
         # faces setting -- the picture and phi must never disagree about it.
         self.geometry_panel.changed.connect(
@@ -212,6 +230,17 @@ class MainWindow(QMainWindow):
         self.recent_menu = file_menu.addMenu("Open &recent")
         self._rebuild_recent_menu()
 
+        file_menu.addSeparator()
+
+        self.open_design_action = QAction("Open &design...", self)
+        self.open_design_action.triggered.connect(self.open_design)
+        file_menu.addAction(self.open_design_action)
+
+        self.save_design_action = QAction("&Save design...", self)
+        self.save_design_action.setShortcut(QKeySequence.Save)
+        self.save_design_action.triggered.connect(self.save_design)
+        file_menu.addAction(self.save_design_action)
+
         self.close_action = QAction("&Close mesh", self)
         self.close_action.setShortcut(QKeySequence.Close)
         self.close_action.triggered.connect(self.close_mesh)
@@ -223,6 +252,19 @@ class MainWindow(QMainWindow):
         quit_action.setShortcut(QKeySequence.Quit)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
+
+        edit_menu = self.menuBar().addMenu("&Edit")
+        self.undo_action = QAction("&Undo", self)
+        self.undo_action.setShortcut(QKeySequence.Undo)
+        self.undo_action.triggered.connect(self.undo)
+        self.undo_action.setEnabled(False)
+        edit_menu.addAction(self.undo_action)
+
+        self.redo_action = QAction("&Redo", self)
+        self.redo_action.setShortcut(QKeySequence.Redo)
+        self.redo_action.triggered.connect(self.redo)
+        self.redo_action.setEnabled(False)
+        edit_menu.addAction(self.redo_action)
 
         view_menu = self.menuBar().addMenu("&View")
         for title, dock in self._docks.items():
@@ -637,6 +679,156 @@ class MainWindow(QMainWindow):
         # Reading it off a tile on another tab requires already knowing
         # to look; on the button it is unavoidable.
         self.field_view.set_estimate(cost)
+
+    # -- Designs (#155) and undo (#156) ------------------------------------
+
+    def current_design(self) -> Design:
+        """Snapshot every choice the user has made."""
+        propellant = self.propellant_panel.propellant_value()
+        design = Design(
+            ends=self.geometry_panel.ends_value(),
+            resolution=self.geometry_panel.resolution_points(),
+            margin=self.geometry_panel.margin_value(),
+            device=self.geometry_panel.device_string(),
+            propellant_name=propellant.name,
+            burn_coefficient=propellant.a,
+            pressure_exponent=propellant.n,
+            density=propellant.density,
+            max_time=float(self.simulation_panel.max_time.value()),
+            cfl=float(self.simulation_panel.cfl.value()),
+            reinit_every=int(self.simulation_panel.reinit_every.value()),
+            units=self.measurements_panel.units(),
+        )
+        design.set_geometry(self._path, base=self._design_base())
+        return design
+
+    def apply_design(self, design: Design, load_geometry: bool = True) -> None:
+        """Put a design back into the panels.
+
+        Signals are suppressed for the duration, then one refresh is issued at
+        the end. Without that, restoring six controls emits six ``changed``
+        signals, each of which would push its own undo entry -- so a single
+        undo would take six presses to get back.
+        """
+        self._applying = True
+        try:
+            self.geometry_panel.set_ends(design.ends)
+            self.geometry_panel.set_resolution(design.resolution)
+            self.geometry_panel.set_margin(design.margin)
+            self.geometry_panel.set_device(design.device)
+            self.propellant_panel.set_propellant(
+                design.propellant_name,
+                design.burn_coefficient,
+                design.pressure_exponent,
+                design.density,
+            )
+            self.simulation_panel.max_time.setValue(design.max_time)
+            self.simulation_panel.cfl.setValue(design.cfl)
+            self.simulation_panel.reinit_every.setValue(design.reinit_every)
+            self.measurements_panel.set_units(design.units)
+        finally:
+            self._applying = False
+
+        if load_geometry:
+            path = design.resolve_geometry(base=self._design_base())
+            if path is not None and path != self._path:
+                self.load_path(path)
+            elif path is None and design.geometry_path:
+                QMessageBox.warning(
+                    self,
+                    "Grain file not found",
+                    "The design loaded, but its grain file is missing:\n\n"
+                    + f"{design.geometry_path}"
+                    + "\n\nEverything else has been restored - open the geometry again to finish.",
+                )
+        self._refresh_grid_metrics()
+        self._refresh_measurements()
+
+    def _design_base(self):
+        """Folder design paths are stored relative to, so a project can move."""
+        return self._design_path.parent if self._design_path else None
+
+    def save_design(self) -> None:
+        start = str(self._design_path or self._last_directory())
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save motor design", start, f"Motor design (*{SUFFIX})"
+        )
+        if not path:
+            return
+        try:
+            self._design_path = Path(path).with_suffix(SUFFIX)
+            # Re-snapshot after setting _design_path so relative geometry paths
+            # are stored against where the design is actually being saved.
+            written = self.current_design().save(self._design_path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not save design", str(exc))
+            return
+        self.status_message.setText(f"Saved {written.name}")
+
+    def open_design(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open motor design", str(self._last_directory()),
+            f"Motor design (*{SUFFIX});;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            design = Design.load(path)
+        except DesignError as exc:
+            QMessageBox.warning(self, "Could not open design", str(exc))
+            return
+        self._design_path = Path(path)
+        self.apply_design(design)
+        self._push_undo(initial=True)
+        self.status_message.setText(f"Opened {Path(path).name}")
+
+    # -- Undo / redo (#156) ------------------------------------------------
+
+    def _push_undo(self, initial: bool = False) -> None:
+        """Record the current settings as an undo point.
+
+        Whole-state snapshots rather than per-control commands: a design is a
+        few dozen scalars, so a snapshot costs nothing, and it sidesteps the
+        entire class of bug where an undo command forgets to restore something
+        it touched indirectly.
+        """
+        if self._applying:
+            return
+        snapshot = self.current_design().to_json()
+        if self._undo_stack and self._undo_stack[-1] == snapshot:
+            return          # nothing actually changed
+        if initial:
+            self._undo_stack = [snapshot]
+        else:
+            self._undo_stack.append(snapshot)
+            del self._undo_stack[:-UNDO_DEPTH]
+        self._redo_stack.clear()
+        self._refresh_undo_actions()
+
+    def _refresh_undo_actions(self) -> None:
+        self.undo_action.setEnabled(len(self._undo_stack) > 1)
+        self.redo_action.setEnabled(bool(self._redo_stack))
+
+    def undo(self) -> None:
+        if len(self._undo_stack) < 2:
+            return
+        self._redo_stack.append(self._undo_stack.pop())
+        # Geometry is deliberately not reloaded: undo should walk back through
+        # settings, not silently re-import a mesh and cost seconds of work.
+        self.apply_design(
+            Design.from_json(self._undo_stack[-1]), load_geometry=False
+        )
+        self._refresh_undo_actions()
+        self.status_message.setText("Undo")
+
+    def redo(self) -> None:
+        if not self._redo_stack:
+            return
+        snapshot = self._redo_stack.pop()
+        self._undo_stack.append(snapshot)
+        self.apply_design(Design.from_json(snapshot), load_geometry=False)
+        self._refresh_undo_actions()
+        self.status_message.setText("Redo")
 
     # -- Recent files ------------------------------------------------------
 
