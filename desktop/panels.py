@@ -483,12 +483,15 @@ class SimulationPanel(QWidget):
         self.run_button.setProperty("accent", True)
         self.run_button.setEnabled(False)
         self.run_button.setToolTip(
-            "Requires φ, which needs the winding-number sign field (#158)."
+            "Not wired up yet (#132). The engine can already burn an imported "
+            "grain — MeshGrain (#192) — but nothing connects this button to it."
         )
         self.run_button.clicked.connect(self.run_requested)
         layout.addWidget(self.run_button)
 
-        blocked = QLabel("Blocked on φ generation (#158).")
+        # #158 landed, so the old "blocked on φ generation" note was simply
+        # wrong. What is missing now is the UI wiring, not the field.
+        blocked = QLabel("Not wired up yet (#132).")
         blocked.setStyleSheet(f"color:{theme.TEXT_FAINT}; font-size:11px;")
         blocked.setAlignment(Qt.AlignCenter)
         layout.addWidget(blocked)

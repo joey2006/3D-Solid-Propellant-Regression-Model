@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
@@ -1273,6 +1274,52 @@ class FieldView(QWidget):
 
     # -- drawing -----------------------------------------------------------
 
+    def _phi_colours(self):
+        """Colormap and limits for φ: full range on the grain, a dark tail beyond.
+
+        Two things are wanted at once, and a single linear scale gives only one
+        of them. Scaling to the whole domain flattens the grain, because φ keeps
+        decreasing far outside the casing and most of the range is spent on
+        empty space. Scaling to the grain instead — the previous behaviour —
+        renders the grain properly but clips everything past the wall to one
+        flat blue, so the field appears to stop existing there.
+
+        So the colormap is extended rather than the limits. Across the grain it
+        is the usual diverging map at full strength. Beyond the casing it
+        continues from that map's darkest blue down towards black, which keeps
+        the field visibly deepening outward while costing the grain none of its
+        range. The scale stays linear throughout, so the colour bar still reads
+        in plain units — the reason an asinh norm was rejected here.
+        """
+        from matplotlib import colormaps
+        from matplotlib.colors import LinearSegmentedColormap
+
+        base = colormaps["RdBu_r"]
+        core = self._to_display(self._phi_core)
+        span = self._to_display(self._phi_span)
+
+        # Nothing outside the casing to shade: the plain map is correct.
+        if not span > core * 1.02:
+            return base, -core, core
+
+        samples = base(np.linspace(0.0, 1.0, 224))
+        darkest = samples[0]
+        # Ramp the extension down to near-black rather than to true black, so
+        # the far field stays distinguishable from the panel background.
+        floor = np.array([0.02, 0.04, 0.09, 1.0])
+        tail = np.linspace(0.0, 1.0, 96)[:, None] * (darkest - floor) + floor
+
+        fraction = (span - core) / (span + core)
+        stops = np.concatenate([tail, samples])
+        positions = np.concatenate([
+            np.linspace(0.0, fraction, len(tail), endpoint=False),
+            np.linspace(fraction, 1.0, len(samples)),
+        ])
+        cmap = LinearSegmentedColormap.from_list(
+            "phi_with_dark_tail", list(zip(positions, stops))
+        )
+        return cmap, -span, core
+
     def _histogram(self, axes, values, np) -> None:
         """Distribution of |∇φ| in the near-surface band, against the ideal 1."""
         axes.set_facecolor(theme.VIEW_BG)
@@ -1352,20 +1399,10 @@ class FieldView(QWidget):
             label = "|∇φ|"
         else:
             shown = self._to_display(field)
-            # A plain linear scale, sized to the grain rather than to the whole
-            # domain. An asinh norm was tried here to keep the field visibly
-            # evolving past the casing, and it did -- but it labelled the colour
-            # bar logarithmically, which made the units unreadable. Legible
-            # units matter more than what happens out in the padding.
-            #
-            # The limit is the largest |phi| inside the casing, computed once
-            # over the whole volume so the scale never shifts between slices.
-            # That puts the full colour range across the grain, where all the
-            # detail is, and lets the empty space beyond simply saturate.
-            limit = self._to_display(self._phi_core)
+            cmap, low, high = self._phi_colours()
             mesh = self._axes.pcolormesh(
-                horizontal, vertical, shown, cmap="RdBu_r", shading="auto",
-                vmin=-limit, vmax=limit,
+                horizontal, vertical, shown, cmap=cmap, shading="auto",
+                vmin=low, vmax=high,
             )
             label = f"φ  ({self._units})"
 
