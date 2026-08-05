@@ -943,13 +943,15 @@ class FieldView(QWidget):
 
         self.metrics = MetricGrid(6)
         self.metrics.add(
-            "grad", "|∇φ| mean",
-            "The defining property of a signed distance field. Should be 1.",
+            "grad", "|∇φ| median",
+            "The defining property of a signed distance field: should be 1. "
+            "Median rather than mean, because the edges of the burning surface "
+            "kink for geometric reasons and would drag a mean around.",
         )
         self.metrics.add(
             "spread", "|∇φ| spread",
-            "Standard deviation in the band. Large means the field is not a "
-            "clean distance function.",
+            "Interquartile range in the band — how tightly the middle half of "
+            "the field sits on 1.",
         )
         self.metrics.add(
             "within", "Within 1%",
@@ -1082,13 +1084,13 @@ class FieldView(QWidget):
         self._coords = [c.detach().to("cpu").numpy() for c in coords]
         self._h = h
 
+        median = stats.get("grad_median", stats["grad_mean"])
+        spread = stats.get("grad_iqr", stats["grad_std"])
         self.metrics.set(
-            "grad", f"{stats['grad_mean']:.4f}",
-            "ok" if abs(stats["grad_mean"] - 1.0) < 0.02 else "warn",
+            "grad", f"{median:.4f}", "ok" if abs(median - 1.0) < 0.01 else "warn"
         )
         self.metrics.set(
-            "spread", f"{stats['grad_std']:.4f}",
-            "ok" if stats["grad_std"] < 0.05 else "warn",
+            "spread", f"{spread:.4f}", "ok" if spread < 0.02 else "warn"
         )
         self.metrics.set(
             "within", f"{stats['grad_within_1pct']:.1%}",
@@ -1104,20 +1106,18 @@ class FieldView(QWidget):
 
         # The verdict, stated rather than left to be inferred from four
         # numbers. This panel exists to answer one question.
-        deviation = abs(stats["grad_mean"] - 1.0)
-        if deviation < 0.02 and stats["grad_std"] < 0.05:
+        if abs(median - 1.0) < 0.01 and spread < 0.02:
             self.banner.show_message(
-                f"|∇φ| = {stats['grad_mean']:.4f} near the surface. This "
-                "is a valid signed distance field — the import produced "
-                "geometry the solver can integrate.",
+                f"|∇φ| = {median:.4f} ± {spread:.4f} near the surface. This is "
+                "a valid signed distance field — the import produced geometry "
+                "the solver can integrate.",
                 "ok",
             )
         else:
             self.banner.show_message(
-                f"|∇φ| = {stats['grad_mean']:.4f} (spread "
-                f"{stats['grad_std']:.4f}) is off 1. The Godunov scheme, the "
-                "CFL timestep and reinitialization all assume it is 1, so this "
-                "field will not integrate cleanly.",
+                f"|∇φ| = {median:.4f} (spread {spread:.4f}) is off 1. The "
+                "Godunov scheme, the CFL timestep and reinitialization all "
+                "assume it is 1, so this field will not integrate cleanly.",
                 "warn",
             )
 
@@ -1213,6 +1213,11 @@ class FieldView(QWidget):
             histogram = None
         self._axes.set_facecolor(theme.VIEW_BG)
 
+        casing_slice = (
+            None if self._phi_outer is None
+            else np.take(self._phi_outer, index, axis=axis)
+        )
+
         if gradient_mode:
             gradients = np.gradient(field, self._h)
             magnitude = np.sqrt(sum(g**2 for g in gradients))
@@ -1226,7 +1231,16 @@ class FieldView(QWidget):
             label = "|∇φ|"
         else:
             shown = self._to_display(field)
-            limit = float(np.abs(shown).max()) or 1.0
+            # Scale the colours to the *grain*, not the whole domain. phi keeps
+            # decreasing outside the casing -- correctly, and by design -- so a
+            # 0.12 m box around a 0.05 m grain spends most of its range on
+            # empty space, squashing everything inside the grain into one flat
+            # blue. Taking the limit from within the casing puts the full
+            # colour range where the geometry actually is.
+            if casing_slice is not None and (casing_slice < 0).any():
+                limit = float(np.abs(shown[casing_slice < 0]).max()) or 1.0
+            else:
+                limit = float(np.abs(shown).max()) or 1.0
             mesh = self._axes.pcolormesh(
                 horizontal, vertical, shown,
                 cmap="RdBu_r", vmin=-limit, vmax=limit, shading="auto",
@@ -1265,26 +1279,25 @@ class FieldView(QWidget):
         # second time at the wall. But it still has to be visible, or the grain
         # appears to have no outer edge at all. Dashed and muted: this line is
         # a boundary the burn stops at, not one it advances along.
-        if self._phi_outer is not None:
-            casing = np.take(self._phi_outer, index, axis=axis)
+        if casing_slice is not None:
+            casing = casing_slice
             if casing.min() < 0.0 < casing.max():
-                # Near-white: this sits on top of a mid-blue field in phi
-                # mode and a magenta one in gradient mode, and a muted grey
-                # disappears into both.
+                # Drawn identically to the bore: same colour, weight and
+                # solid style. They are different kinds of boundary -- one
+                # moves, one does not -- but as an outline of the grain they
+                # read better matched than contrasted, and the caption below
+                # carries the distinction instead.
                 self._axes.contour(
                     horizontal, vertical, casing, levels=[0.0],
-                    colors=["#f2f5f7"], linewidths=1.5,
-                    linestyles=[(0, (6, 3))],
-                )
-                handles.append(
-                    Line2D([], [], color="#f2f5f7", linewidth=1.5,
-                           linestyle=(0, (6, 3)))
+                    colors=[theme.ACCENT], linewidths=1.6,
                 )
                 names.append("casing wall (inhibited)")
 
         if handles:
             legend = self._axes.legend(
-                handles, names, loc="upper right", fontsize=8,
+                handles[:1],
+                ["grain boundary — inner line burns, outer is the casing"],
+                loc="upper right", fontsize=8,
                 facecolor=theme.BG_RAISED, edgecolor=theme.BORDER, framealpha=0.9,
             )
             for text in legend.get_texts():

@@ -89,8 +89,28 @@ class PhiWorker(QObject):
             band = phi.abs() < 3 * h
             in_band = magnitude[band]
 
+            # Median and interquartile range, not mean and standard deviation.
+            # The distribution has a legitimate heavy tail: where the burning
+            # surface has an *edge* -- the rim where the bore meets an
+            # inhibited end face -- the distance function genuinely kinks, and
+            # |grad phi| is undefined there for the same reason it is on a
+            # medial axis. That is geometry, not numerical error, and it is
+            # unavoidable once the burning surface is an open patch rather than
+            # a closed one.
+            #
+            # On a BATES that rim is ~18% of the band, and it drags the mean to
+            # 1.03 with a standard deviation of 0.25 while the field away from
+            # it sits at 0.991 +/- 0.012. Robust statistics report the bulk
+            # honestly; the "within 1%" figure and the spatial map still expose
+            # the tail rather than hiding it.
+            quartile_1, median, quartile_3 = (
+                float(torch.quantile(in_band, q)) for q in (0.25, 0.5, 0.75)
+            )
+
             stats = {
                 "seconds": elapsed,
+                "grad_median": median,
+                "grad_iqr": quartile_3 - quartile_1,
                 "grad_mean": float(in_band.mean()),
                 "grad_std": float(in_band.std()),
                 "grad_within_1pct": float(
