@@ -275,9 +275,14 @@ class HelpGroup(QGroupBox):
         # hand into the title row: 20 px of margin-top above the frame, with
         # the title sitting at the left. Keeping it inside that band means it
         # never collides with the controls below, whatever they are.
+        #
+        # y = 0 rides the top of that band. Qt clips children to the parent
+        # rect, so this is as high as the button can sit without losing its
+        # top edge -- the button is 18 px inside a 20 px band, and the visual
+        # lift comes from the 2 px of clearance now sitting entirely below it.
         super().resizeEvent(event)
         size = self._button.width()
-        self._button.move(max(0, self.width() - size - 8), 1)
+        self._button.move(max(0, self.width() - size - 8), 0)
 
 
 def divider() -> QFrame:
