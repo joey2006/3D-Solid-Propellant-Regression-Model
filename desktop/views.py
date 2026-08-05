@@ -897,6 +897,31 @@ class FieldView(QWidget):
             "here with physical meaning. On a BATES you should see two: the "
             "bore and the outer wall.",
 
+            "<b>The five diagnostic numbers.</b> <i>|∇φ| mean</i> is the "
+            "headline — it should read 1.0000, and anything past about "
+            "0.02 off means the field is not a clean distance function. "
+            "<i>Spread</i> is the standard deviation of the same "
+            "measurement: a low mean with a high spread means it is "
+            "right on average while being wrong in specific places, "
+            "which is worse than it sounds. <i>Within 1%</i> is the "
+            "share of near-surface cells landing between 0.99 and "
+            "1.01 — the strictest of the three, and the one that "
+            "notices a small badly-behaved region the mean would "
+            "average away. <i>Solid cells</i> is how much of the grid "
+            "the sign field called propellant; sanity-check it against "
+            "port fraction in Measurements. <i>Burning faces</i> is how "
+            "many mesh triangles φ measures distance from.",
+
+            "<b>Only the burning surfaces are measured from.</b> The grain "
+            "is lit in the bore, so φ is the distance to the bore and "
+            "slot walls. The outer wall is bonded to the casing and "
+            "never sees flame, so it is excluded — include it and φ "
+            "would turn around in the middle of the web and cross zero "
+            "again at the wall, and the solver would eat the grain from "
+            "the outside in. The end faces are a setting, since nothing "
+            "in the geometry distinguishes a painted end from a bare "
+            "one.",
+
             "<b>|∇φ| (the gradient magnitude)</b> measures how fast φ changes "
             "as you step across the grid. For a true distance field it must be "
             "exactly 1: move 1 mm and the distance to the surface changes by "
@@ -914,7 +939,7 @@ class FieldView(QWidget):
         self.banner = Banner()
         strip_layout.addWidget(self.banner)
 
-        self.metrics = MetricGrid(5)
+        self.metrics = MetricGrid(6)
         self.metrics.add(
             "grad", "|∇φ| mean",
             "The defining property of a signed distance field. Should be 1.",
@@ -932,6 +957,12 @@ class FieldView(QWidget):
             "solid", "Solid cells",
             "Share of the domain the sign field calls propellant. Compare it "
             "against the port fraction in Measurements.",
+        )
+        self.metrics.add(
+            "burning", "Burning faces",
+            "How many mesh faces φ measures distance from. The outer "
+            "wall is always excluded; whether the end faces are included "
+            "is the End faces setting in the Geometry panel.",
         )
         self.metrics.add("time", "Build time")
         strip_layout.addWidget(self.metrics)
@@ -1059,6 +1090,11 @@ class FieldView(QWidget):
             "ok" if stats["grad_within_1pct"] > 0.8 else "warn",
         )
         self.metrics.set("solid", f"{stats['solid_fraction']:.1%}")
+        self.metrics.set(
+            "burning",
+            f"{stats.get('n_burning', 0):,}",
+            "ok" if stats.get("n_burning") else "error",
+        )
         self.metrics.set("time", f"{stats['seconds']:.2f} s")
 
         # The verdict, stated rather than left to be inferred from four

@@ -431,7 +431,11 @@ class MainWindow(QMainWindow):
 
         self._thread = QThread(self)
         self._worker = PhiWorker(
-            self._mesh, resolution, self.geometry_panel.margin_value(), device
+            self._mesh,
+            resolution,
+            self.geometry_panel.margin_value(),
+            device,
+            ends=self.geometry_panel.ends_value(),
         )
         self._worker.moveToThread(self._thread)
 

@@ -294,6 +294,174 @@ def winding_number_and_distance(
     return angle / full_turn, squared.clamp_min(0.0).sqrt()
 
 
+def winding_and_split_distance(
+    points: torch.Tensor,
+    vertices: torch.Tensor,
+    primitives: torch.Tensor,
+    burning: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Winding number over *all* primitives, distance split by label (#176).
+
+    Returns ``(winding, distance_to_burning, distance_to_inhibited)``.
+
+    The split matters because the two halves need different inputs. **Sign has
+    to come from the whole closed surface** -- the winding number measures how
+    much of the surround the boundary covers, so feeding it only the burning
+    faces would hand it an open patch and a meaningless answer. **Distance has
+    to come from the burning faces only**, because the burning surface is what
+    φ is supposed to measure distance to.
+
+    Both distances fall out of the one traversal, which is the expensive part.
+    """
+    if burning.shape[0] != primitives.shape[0]:
+        raise ValueError(
+            f"burning mask has {burning.shape[0]} entries for "
+            f"{primitives.shape[0]} primitives"
+        )
+
+    dim = points.shape[-1]
+    vertices = vertices.to(device=points.device, dtype=points.dtype)
+    corners = vertices[primitives.to(device=points.device).long()]
+    burning = burning.to(device=points.device, dtype=torch.bool)
+
+    n_points = points.shape[0]
+    n_primitives = corners.shape[0]
+    point_block, primitive_block = _blocks(n_points, n_primitives)
+
+    angle = torch.zeros(n_points, dtype=points.dtype, device=points.device)
+    infinity = float("inf")
+    burn_squared = torch.full(
+        (n_points,), infinity, dtype=points.dtype, device=points.device
+    )
+    inhibited_squared = torch.full(
+        (n_points,), infinity, dtype=points.dtype, device=points.device
+    )
+
+    for start in range(0, n_points, point_block):
+        stop = min(start + point_block, n_points)
+        block = points[start:stop].unsqueeze(1)
+
+        angle_sum = torch.zeros(
+            stop - start, dtype=points.dtype, device=points.device
+        )
+        best_burn = torch.full(
+            (stop - start,), infinity, dtype=points.dtype, device=points.device
+        )
+        best_inhibited = torch.full(
+            (stop - start,), infinity, dtype=points.dtype, device=points.device
+        )
+
+        for first in range(0, n_primitives, primitive_block):
+            last = min(first + primitive_block, n_primitives)
+            chunk = corners[first:last].unsqueeze(0)
+            labels = burning[first:last]
+
+            if dim == 3:
+                a, b, c = chunk[..., 0, :], chunk[..., 1, :], chunk[..., 2, :]
+                angle_sum += _triangle_solid_angle(block, a, b, c).sum(-1)
+                closest = _closest_point_on_triangle(block, a, b, c)
+            else:
+                a, b = chunk[..., 0, :], chunk[..., 1, :]
+                angle_sum += _segment_angle(block, a, b).sum(-1)
+                closest = _closest_point_on_segment(block, a, b)
+
+            offset = closest - block
+            squared = (offset * offset).sum(-1)
+            # Masking with +inf rather than indexing keeps the tensor shape
+            # fixed, so the two minima cost one extra reduction each instead of
+            # a second traversal.
+            masked = torch.where(labels, squared, torch.full_like(squared, infinity))
+            best_burn = torch.minimum(best_burn, masked.amin(dim=-1))
+            masked = torch.where(labels, torch.full_like(squared, infinity), squared)
+            best_inhibited = torch.minimum(best_inhibited, masked.amin(dim=-1))
+
+        angle[start:stop] = angle_sum
+        burn_squared[start:stop] = best_burn
+        inhibited_squared[start:stop] = best_inhibited
+
+    full_turn = 4.0 * torch.pi if dim == 3 else 2.0 * torch.pi
+    return (
+        angle / full_turn,
+        burn_squared.clamp_min(0.0).sqrt(),
+        inhibited_squared.clamp_min(0.0).sqrt(),
+    )
+
+
+def phi_from_labelled_boundary(
+    coords: tuple[torch.Tensor, ...],
+    vertices: torch.Tensor,
+    primitives: torch.Tensor,
+    burning: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """φ measured to the burning surface, plus the casing field. ``(phi, phi_outer)``
+
+    This is the physically correct import path. :func:`phi_from_boundary` gives
+    the signed distance to the *object*, which is a different thing: its zero
+    set includes the outer wall, so a solver advancing it would burn the grain
+    inward from the casing as well as outward from the bore.
+
+    The sign rule has three cases, and the third is the one that fixes it:
+
+    * **inside the solid** -- propellant, ``φ = -distance to burning surface``.
+    * **outside the solid, nearer a burning face** -- the bore or a slot, so
+      genuinely open void: ``φ = +distance``.
+    * **outside the solid, nearer an inhibited face** -- past the casing wall.
+      This is *not* void the flame can reach, so φ stays **negative** and keeps
+      decreasing outward. No second zero crossing appears at the wall, and the
+      field matches what ``BATESGrain.signed_distance`` produces analytically.
+
+    "Nearer a burning face" is decided by comparing the two distances rather
+    than by identifying the closest face, which is the same test without having
+    to carry face indices through the reduction.
+
+    ``phi_outer`` is the casing: negative within the wall, positive beyond it,
+    ready for the existing ``min(phi, -phi_outer)`` clamp. With no inhibited
+    faces at all it is ``-inf`` everywhere, which the clamp correctly treats as
+    "no casing".
+    """
+    shape = coords[0].shape
+    points = torch.stack([c.reshape(-1) for c in coords], dim=-1)
+
+    winding, to_burning, to_inhibited = winding_and_split_distance(
+        points, vertices, primitives, burning
+    )
+
+    inside = winding > INSIDE_THRESHOLD
+    open_void = ~inside & (to_burning <= to_inhibited)
+    phi = torch.where(open_void, to_burning, -to_burning)
+
+    # The casing surface, signed the same way as GrainGeometry's:
+    # negative inside the wall, positive outside it.
+    beyond_casing = ~inside & (to_inhibited < to_burning)
+    phi_outer = torch.where(beyond_casing, to_inhibited, -to_inhibited)
+
+    return phi.reshape(shape), phi_outer.reshape(shape)
+
+
+def phi_from_labelled_mesh(
+    coords: tuple[torch.Tensor, ...],
+    mesh,
+    ends: str | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> tuple[torch.Tensor, torch.Tensor, dict]:
+    """``(phi, phi_outer, labels)`` for a mesh, labelling its faces first.
+
+    ``ends`` selects how the axial end faces are treated -- see
+    :mod:`srm_burnback.geometry.surfaces`, which owns that decision.
+    """
+    from .surfaces import DEFAULT_ENDS, surface_labels
+
+    labels = surface_labels(mesh, ends or DEFAULT_ENDS)
+
+    device = coords[0].device
+    vertices = torch.as_tensor(mesh.vertices, dtype=dtype, device=device)
+    faces = torch.as_tensor(mesh.faces, dtype=torch.long, device=device)
+    burning = torch.as_tensor(labels["burning"], dtype=torch.bool, device=device)
+
+    phi, phi_outer = phi_from_labelled_boundary(coords, vertices, faces, burning)
+    return phi, phi_outer, labels
+
+
 def phi_from_boundary(
     coords: tuple[torch.Tensor, ...],
     vertices: torch.Tensor,

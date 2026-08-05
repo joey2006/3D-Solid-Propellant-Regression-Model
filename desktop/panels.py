@@ -163,6 +163,44 @@ class GeometryPanel(QWidget):
 
         layout.addWidget(grid_box)
 
+        # --- Burning surfaces (#176) --------------------------------------
+        surface_box = HelpGroup("Burning surfaces")
+        surface_layout = QVBoxLayout(surface_box)
+        surface_layout.setSpacing(8)
+
+        self.ends = QComboBox()
+        self.ends.addItems(["Inhibited", "Burning"])
+        self.ends.setToolTip(
+            "Whether the flat end faces of the grain burn, or are painted with "
+            "inhibitor. Nothing in the geometry can tell these apart."
+        )
+        self.ends.currentIndexChanged.connect(self.changed)
+        surface_layout.addWidget(FieldRow("End faces", self.ends))
+        surface_layout.addWidget(
+            surface_box.add_help(
+                "The grain is lit in the bore and burns outward, so φ measures "
+                "distance from the bore and the slots — never from the outer "
+                "wall, which is bonded to the casing and never sees flame. The "
+                "end faces are the one part geometry cannot settle: an "
+                "inhibitor-painted end looks identical to a bare one. Inhibited "
+                "is the default. Treating burning ends as inhibited (or the "
+                "reverse) changes burn area and therefore the whole thrust "
+                "curve, so it is worth being sure."
+            )
+        )
+        surface_layout.addWidget(
+            surface_box.add_help(
+                "Note this is about which surfaces are <i>lit</i>, not how fast "
+                "they burn. The aft end of the bore burns faster than the fore "
+                "end because combustion gas accelerates toward the nozzle and "
+                "scrubs the surface — that is erosive burning, a rate effect "
+                "on the bore, and it happens whether or not the ends are "
+                "inhibited."
+            )
+        )
+
+        layout.addWidget(surface_box)
+
         # --- Compute ------------------------------------------------------
         device_box = HelpGroup("Compute")
         device_layout = QVBoxLayout(device_box)
@@ -243,6 +281,10 @@ class GeometryPanel(QWidget):
 
     def device_string(self) -> str:
         return "cuda" if self.device.currentText().startswith("CUDA") else "cpu"
+
+    def ends_value(self) -> str:
+        """How the grain's end faces should be treated: burning or inhibited."""
+        return self.ends.currentText().lower()
 
     def set_file(self, name: str | None) -> None:
         if name:

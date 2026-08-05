@@ -37,12 +37,14 @@ class PhiWorker(QObject):
     failed = Signal(str)
     progress = Signal(str)
 
-    def __init__(self, mesh, resolution: int, margin: float, device: str):
+    def __init__(self, mesh, resolution: int, margin: float, device: str,
+                 ends: str = "inhibited"):
         super().__init__()
         self._mesh = mesh
         self._resolution = int(resolution)
         self._margin = float(margin)
         self._device = device
+        self._ends = ends
 
     def run(self) -> None:
         try:
@@ -51,7 +53,9 @@ class PhiWorker(QObject):
             import torch
 
             from srm_burnback.geometry.import_mesh import grid_for_mesh
-            from srm_burnback.geometry.winding_number import phi_from_mesh
+            from srm_burnback.geometry.winding_number import (
+                phi_from_labelled_mesh,
+            )
 
             self.progress.emit(
                 f"Building {self._resolution}³ grid around the mesh..."
@@ -65,7 +69,12 @@ class PhiWorker(QObject):
                 f"× {len(self._mesh.faces):,} triangles..."
             )
             started = time.time()
-            phi = phi_from_mesh(coords, self._mesh)
+            # The labelled path, not the plain object SDF: distance is
+            # measured to the burning surface only, so the outer wall does
+            # not become a second zero contour the solver would advance.
+            phi, phi_outer, labels = phi_from_labelled_mesh(
+                coords, self._mesh, ends=self._ends
+            )
             if self._device == "cuda":
                 torch.cuda.synchronize()
             elapsed = time.time() - started
@@ -91,6 +100,9 @@ class PhiWorker(QObject):
                 "solid_fraction": float((phi < 0).float().mean()),
                 "phi_min": float(phi.min()),
                 "phi_max": float(phi.max()),
+                "n_burning": labels["n_burning"],
+                "n_inhibited": labels["n_inhibited"],
+                "ends": labels["ends"],
             }
             self.finished.emit(phi, coords, h, stats)
         except Exception as exc:

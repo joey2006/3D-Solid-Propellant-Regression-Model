@@ -362,3 +362,163 @@ class TestConventionsAndGuards:
         )
         assert torch.allclose(on_cpu[0], on_gpu[0].cpu(), atol=1e-9)
         assert torch.allclose(on_cpu[1], on_gpu[1].cpu(), atol=1e-9)
+
+
+class TestBurningSurfaceOnly:
+    """φ must measure distance to the burning surface, not to the object (#176).
+
+    The bug this guards against is silent and severe: measure distance to the
+    whole closed mesh and φ turns around at the middle of the web, crosses zero
+    again at the outer wall, and the solver consumes the grain from the outside
+    in. Burn area roughly doubles. Nothing complains -- ``|∇φ| = 1`` still holds
+    perfectly, because the object SDF is a perfectly good SDF of the object.
+
+    ``BATESGrain`` is the oracle again, and it is the right one: it models the
+    bore alone, with the casing as a separate static field.
+    """
+
+    @staticmethod
+    def _bates(ends: str):
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+        from make_test_meshes import (
+            INNER_RADIUS,
+            LENGTH,
+            OUTER_RADIUS,
+            make_bates,
+        )
+        from srm_burnback.geometry.BATESGrain import BATESGrain
+        from srm_burnback.geometry.winding_number import phi_from_labelled_mesh
+
+        coords, h = build_coords(GRID, 0.07, length=0.14, device=DEVICE)
+        coords = tuple(c.to(DTYPE) for c in coords)
+        phi, phi_outer, labels = phi_from_labelled_mesh(
+            coords, make_bates(sections=BATES_SECTIONS[-1]), ends=ends, dtype=DTYPE
+        )
+        exact = BATESGrain(INNER_RADIUS, OUTER_RADIUS, LENGTH).signed_distance(coords)
+        return coords, h, phi, phi_outer, exact, labels
+
+    def test_phi_never_turns_back_toward_zero_past_the_wall(self):
+        coords, h, phi, _, _, _ = self._bates("inhibited")
+        X, Y, Z = coords
+        radius = torch.sqrt(X**2 + Y**2)
+
+        # Along a radial line at mid-length, outside the bore, phi must keep
+        # decreasing. The old object-SDF reversed at the web midpoint.
+        row, mid = X.shape[1] // 2, X.shape[2] // 2
+        line = phi[X.shape[0] // 2 :, row, mid]
+        radii = radius[X.shape[0] // 2 :, row, mid]
+        outside_bore = radii > 0.012
+        values = line[outside_bore]
+        assert (values[1:] < values[:-1]).all(), values
+
+    def test_no_second_zero_crossing_at_the_outer_wall(self):
+        _, _, phi, _, _, _ = self._bates("inhibited")
+        # Every point outside the bore is propellant-side. If the outer wall
+        # were in the burning set, a whole shell of positive phi would appear
+        # beyond it.
+        assert phi.max() > 0, "the bore itself must still be positive"
+        positive_fraction = float((phi > 0).float().mean())
+        # Only the bore is open void: a 10 mm bore in a 140 mm cube is small.
+        assert positive_fraction < 0.05, positive_fraction
+
+    def test_burning_ends_reproduce_the_analytical_bates(self):
+        """With burning ends this *is* ``BATESGrain`` -- the strongest check.
+
+        ``BATESGrain.signed_distance`` is ``max(bore, |z| - L/2)``: bore and
+        both ends burning, outer wall absent. Labelling the mesh the same way
+        reproduces it to **0.002 h** inside the casing, where the plain object
+        SDF was wrong by whole cells.
+
+        Restricted to ``r < outer_radius`` because the two genuinely differ
+        outside it, and the oracle is the one being loose there: ``BATESGrain``
+        has no outer wall at all, so it reports propellant receding forever,
+        while this field measures distance to the nearest real burning face.
+        That region is outside the casing and gets clamped before it is ever
+        used.
+        """
+        coords, h, phi, _, exact, labels = self._bates("burning")
+        assert labels["ends"] == "burning"
+
+        X, Y, _ = coords
+        inside_casing = torch.sqrt(X**2 + Y**2) < 0.05
+        error = (phi - exact).abs()[inside_casing]
+        assert float(error.mean()) / h < 0.01
+
+    def test_inhibited_ends_do_not_burn_but_the_bore_still_does(self):
+        coords, h, phi, _, exact, labels = self._bates("inhibited")
+        X, Y, Z = coords
+        radius = torch.sqrt(X**2 + Y**2)
+
+        # Past the end faces, in the annulus of propellant, phi stays negative:
+        # an inhibited end is not a surface the flame can advance from.
+        beyond_end = Z.abs() > 0.062
+        annulus = beyond_end & (radius > 0.014) & (radius < 0.05)
+        assert (phi[annulus] < 0).all()
+
+        # Directly past the bore opening is a deliberate exception, and it is
+        # correct: that is the port continuing out of the grain -- open volume
+        # the flame genuinely occupies -- not propellant. It stays positive.
+        port = beyond_end & (radius < 0.008)
+        assert (phi[port] > 0).all()
+
+        # The bore is unaffected by the end-face choice.
+        bore = (radius < 0.008) & (Z.abs() < 0.05)
+        assert (phi[bore] > 0).all()
+
+    def test_end_choice_matters_far_from_the_ends_too(self):
+        """The end-face setting is not a local touch-up.
+
+        A burning end is the nearest burning surface for everything within its
+        own distance of it, so labelling the ends changes φ across a large
+        fraction of the web -- measured at ~39% of cells inside the casing.
+        That is precisely why it is exposed as a setting rather than guessed:
+        getting it wrong is not a rounding error on the end faces, it moves the
+        burn front through most of the grain.
+
+        The two agree only deep in the region where the bore is unambiguously
+        the closest burning surface.
+        """
+        coords, _, burning, _, _, _ = self._bates("burning")
+        _, _, inhibited, _, _, _ = self._bates("inhibited")
+
+        X, Y, Z = coords
+        radius = torch.sqrt(X**2 + Y**2)
+
+        # Near the bore and far from either end, distance-to-bore wins outright
+        # under both labellings, so the fields must agree exactly.
+        bore_dominates = (radius < 0.02) & (Z.abs() < 0.03)
+        assert torch.allclose(
+            burning[bore_dominates], inhibited[bore_dominates], atol=1e-12
+        )
+
+        # Out in the web they differ substantially.
+        inside_casing = radius < 0.05
+        differing = ((burning - inhibited).abs() > 1e-9)[inside_casing]
+        assert float(differing.float().mean()) > 0.2
+
+    def test_casing_field_is_negative_inside_and_positive_outside(self):
+        coords, _, _, phi_outer, _, _ = self._bates("inhibited")
+        X, Y, Z = coords
+        radius = torch.sqrt(X**2 + Y**2)
+        # Ready for the runner's min(phi, -phi_outer) clamp, which needs the
+        # same sign convention as GrainGeometry.outer_boundary_distance.
+        assert (phi_outer[(radius < 0.04) & (Z.abs() < 0.05)] < 0).all()
+        assert (phi_outer[radius > 0.058] > 0).all()
+
+    def test_sign_still_comes_from_the_whole_closed_mesh(self):
+        """Restricting *distance* must not restrict the sign computation.
+
+        The winding number needs a closed surface; handed only the bore faces
+        it would be integrating an open patch and the inside/outside answer
+        would be meaningless. The bore being positive and the web negative is
+        what demonstrates the sign came from the full mesh.
+        """
+        coords, _, phi, _, _, _ = self._bates("inhibited")
+        X, Y, Z = coords
+        radius = torch.sqrt(X**2 + Y**2)
+        mid = Z.abs() < 0.04
+        assert (phi[(radius < 0.008) & mid] > 0).all()
+        assert (phi[(radius > 0.015) & (radius < 0.045) & mid] < 0).all()
