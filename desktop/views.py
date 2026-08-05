@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
 )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.colors import AsinhNorm
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
@@ -309,8 +308,12 @@ class MeshView(QWidget):
 
                 for ends in ("inhibited", "burning"):
                     labels = surface_labels(source, ends=ends)["burning"]
-                    burn = np.empty((len(labels), 3), dtype=np.uint8)
-                    burn[:] = rgb(theme.SURFACE)
+                    # Inhibited faces keep the same tones they have in Regions
+                    # -- outer wall light, end faces darker -- so switching
+                    # between the two colourings does not reshuffle the whole
+                    # model. Only the burning faces change, to accent, which
+                    # is the one distinction this view exists to make.
+                    burn = colours.copy()
                     burn[labels] = rgb(theme.ACCENT)
                     mesh.cell_data[f"burn_rgb_{ends}"] = burn
             # Split vertices along sharp creases so smooth shading rounds
@@ -857,6 +860,7 @@ class FieldView(QWidget):
         self._coords = None
         self._phi_span = 1.0
         self._phi_core = 1.0
+        self._slice_range = {}
         self._h = 0.0
         self._axis = 2
         self._mode = "phi"
@@ -1177,6 +1181,27 @@ class FieldView(QWidget):
         # apart. Fixed limits also make two slices actually comparable.
         import numpy as _np
 
+        # Which slice indices along each axis actually cut through the grain.
+        # The grid is a padded cube, so the outermost slices sit in empty space
+        # beyond the ends -- and a slice of nothing but padding is not a
+        # picture of anything. The slider is mapped onto this range instead of
+        # the full grid, so it can no longer be dragged off the part.
+        self._slice_range = {}
+        # Propellant, specifically: phi negative *and* inside the casing. The
+        # casing field alone is not enough -- the port continues out past the
+        # end faces toward the nozzle, so it reports every axial slice as
+        # occupied and the bound does nothing on the axis that needed it most.
+        occupied = self._phi < 0
+        if self._phi_outer is not None:
+            occupied = occupied & (self._phi_outer < 0)
+        for axis in range(3):
+            others = tuple(a for a in range(3) if a != axis)
+            present = _np.where(occupied.any(axis=others))[0]
+            self._slice_range[axis] = (
+                (int(present[0]), int(present[-1])) if present.size
+                else (0, self._phi.shape[axis] - 1)
+            )
+
         self._phi_span = float(_np.abs(self._phi).max()) or 1.0
         if self._phi_outer is not None and (self._phi_outer < 0).any():
             self._phi_core = (
@@ -1189,12 +1214,16 @@ class FieldView(QWidget):
 
         median = stats.get("grad_median", stats["grad_mean"])
         spread = stats.get("grad_iqr", stats["grad_std"])
-        # Shown but muted, and carrying no pass/fail accent, until #193 settles
-        # what these should say. A green or orange bar is a claim about whether
-        # the import is good, and that claim is exactly what is in question.
-        self.metrics.set("grad", f"{median:.4f}", "muted")
-        self.metrics.set("spread", f"{spread:.4f}", "muted")
-        self.metrics.set("within", f"{stats['grad_within_1pct']:.1%}", "muted")
+        self.metrics.set(
+            "grad", f"{median:.4f}", "ok" if abs(median - 1.0) < 0.01 else "warn"
+        )
+        self.metrics.set(
+            "spread", f"{spread:.4f}", "ok" if spread < 0.02 else "warn"
+        )
+        self.metrics.set(
+            "within", f"{stats['grad_within_1pct']:.1%}",
+            "ok" if stats["grad_within_1pct"] > 0.8 else "warn",
+        )
         self.metrics.set("solid", f"{stats['solid_fraction']:.1%}")
         self.metrics.set(
             "burning",
@@ -1270,11 +1299,9 @@ class FieldView(QWidget):
         import numpy as np
 
         axis = self._axis
-        count = self._phi.shape[axis]
-        index = min(
-            count - 1,
-            max(0, round(self.slice_slider.value() / 100 * (count - 1))),
-        )
+        low, high = self._slice_range.get(axis, (0, self._phi.shape[axis] - 1))
+        index = low + round(self.slice_slider.value() / 100 * (high - low))
+        index = min(high, max(low, index))
 
         field = np.take(self._phi, index, axis=axis)
         position = float(np.take(self._coords[axis], index, axis=axis).flat[0])
@@ -1325,23 +1352,20 @@ class FieldView(QWidget):
             label = "|∇φ|"
         else:
             shown = self._to_display(field)
-            # Two competing needs. phi keeps decreasing outside the casing --
-            # correctly, and by design -- so a 0.12 m box around a 0.05 m grain
-            # spends most of its range on empty space, flattening the grain
-            # into one blue. But hard-clipping to the grain put a false hard
-            # edge exactly at the outer wall, as though the field stopped there.
+            # A plain linear scale, sized to the grain rather than to the whole
+            # domain. An asinh norm was tried here to keep the field visibly
+            # evolving past the casing, and it did -- but it labelled the colour
+            # bar logarithmically, which made the units unreadable. Legible
+            # units matter more than what happens out in the padding.
             #
-            # An asinh norm does both: linear across the grain, where
-            # `linear_width` is the largest |phi| inside the casing, then
-            # smoothly compressed beyond it. The full range stays visible and
-            # the field visibly keeps evolving past the wall, with no break.
+            # The limit is the largest |phi| inside the casing, computed once
+            # over the whole volume so the scale never shifts between slices.
+            # That puts the full colour range across the grain, where all the
+            # detail is, and lets the empty space beyond simply saturate.
+            limit = self._to_display(self._phi_core)
             mesh = self._axes.pcolormesh(
                 horizontal, vertical, shown, cmap="RdBu_r", shading="auto",
-                norm=AsinhNorm(
-                    linear_width=self._to_display(self._phi_core),
-                    vmin=-self._to_display(self._phi_span),
-                    vmax=self._to_display(self._phi_span),
-                ),
+                vmin=-limit, vmax=limit,
             )
             label = f"φ  ({self._units})"
 
