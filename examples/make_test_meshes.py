@@ -12,6 +12,13 @@ import path and the viewer app:
 * ``finocyl.stl``    -- a bore with radial fins. Not axially uniform, so it
   cannot be represented as an extruded 2D cross-section; this is the case that
   genuinely requires 3D geometry.
+* ``bates_torn.stl`` -- one *contiguous* 90-degree wedge removed. Where
+  ``bates_holed`` shows the winding number shrugging off scattered damage,
+  this is the case that shows where it actually degrades.
+
+Each fixture is meant to isolate one variable, and ``main`` asserts that they
+still do -- a shape fixture that is also accidentally damaged tests two things
+at once and can fail for either reason (#178).
 
 Run with::
 
@@ -114,6 +121,38 @@ def make_holed(mesh: trimesh.Trimesh, fraction: float = 0.15,
     return holed
 
 
+def make_torn(mesh: trimesh.Trimesh, degrees: float = 90.0) -> trimesh.Trimesh:
+    """Remove one contiguous angular wedge, leaving a single large hole.
+
+    This is the damage that actually tests the generalized winding number.
+    ``make_holed`` deletes faces at *random*, which scatters isolated gaps that
+    are almost all smaller than the grid spacing -- invisible to a field
+    sampled on a grid, and comfortably inside the regime where the winding
+    number is exact. It shows the method does not fall over; it does not find
+    where it breaks.
+
+    A wedge does. The winding number measures how much of the full surround the
+    boundary covers, so removing a contiguous solid angle drives ``w`` down in
+    proportion to what is missing, and the 0.5 threshold is crossed when roughly
+    half the surface is gone. Measured on a 128-section BATES:
+
+        wedge     faces removed    sign accuracy    mean w inside
+          30 deg        86             99.5%            0.914
+          60 deg       170             97.1%            0.832
+          90 deg       256             93.0%            0.746
+         180 deg       512             83.4%            0.495
+         240 deg       682             77.3%            0.328
+
+    So the honest statement of the method's limit is not "it tolerates holes"
+    but "it tolerates missing surround, and degrades in proportion to it".
+    """
+    centres = mesh.triangles_center
+    angle = np.degrees(np.arctan2(centres[:, 1], centres[:, 0]))
+    torn = mesh.copy()
+    torn.update_faces(np.abs(angle) > degrees / 2.0)
+    return torn
+
+
 def _report(name: str, mesh: trimesh.Trimesh) -> None:
     print(
         f"  {name:20s} {len(mesh.faces):>7,} tris  "
@@ -137,6 +176,28 @@ def main() -> None:
     finocyl = make_finocyl()
     finocyl.export(OUT_DIR / "finocyl.stl")
     _report("finocyl.stl", finocyl)
+
+    torn = make_torn(bates)
+    torn.export(OUT_DIR / "bates_torn.stl")
+    _report("bates_torn.stl", torn)
+
+    # The fixtures are only useful if each isolates the variable it is named
+    # for (#178). finocyl in particular is meant to test axial non-uniformity,
+    # and was once accidentally non-watertight as well -- which quietly made
+    # every test using it exercise the damaged-mesh path too.
+    for name, mesh, should_be_closed in (
+        ("bates", bates, True),
+        ("finocyl", finocyl, True),
+        ("bates_holed", holed, False),
+        ("bates_torn", torn, False),
+    ):
+        if mesh.is_watertight is not should_be_closed:
+            raise AssertionError(
+                f"{name}.stl is {'not ' if should_be_closed else ''}watertight "
+                f"but was meant to be {'closed' if should_be_closed else 'open'}"
+                " -- the fixture no longer isolates the variable it is named for."
+            )
+    print("\nfixtures verified: closed meshes closed, damaged meshes damaged")
 
     print("\nExpected for bates.stl:")
     print(f"  bore radius   {INNER_RADIUS} m")

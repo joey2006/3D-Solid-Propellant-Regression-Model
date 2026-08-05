@@ -522,3 +522,100 @@ class TestBurningSurfaceOnly:
         mid = Z.abs() < 0.04
         assert (phi[(radius < 0.008) & mid] > 0).all()
         assert (phi[(radius > 0.015) & (radius < 0.045) & mid] < 0).all()
+
+
+class TestFixturesIsolateOneVariableEach:
+    """Each damaged fixture must be damaged in the way it claims (#178).
+
+    ``finocyl`` was once accidentally non-watertight as well as axially
+    non-uniform, which quietly made every test using it exercise the
+    damaged-mesh path too, so a failure could not be attributed to either
+    cause without extra work. The generator now asserts this; these tests keep
+    it honest from the other side.
+    """
+
+    @staticmethod
+    def _fixtures():
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+        from make_test_meshes import make_bates, make_finocyl, make_holed, make_torn
+
+        return make_bates, make_finocyl, make_holed, make_torn
+
+    def test_the_shape_fixtures_are_closed(self):
+        make_bates, make_finocyl, _, _ = self._fixtures()
+        assert make_bates(sections=64).is_watertight
+        # Axial non-uniformity is the only variable this one should carry.
+        assert make_finocyl().is_watertight
+
+    def test_the_damaged_fixtures_are_open(self):
+        make_bates, _, make_holed, make_torn = self._fixtures()
+        clean = make_bates(sections=64)
+        assert not make_holed(clean).is_watertight
+        assert not make_torn(clean).is_watertight
+
+
+class TestWhereTheWindingNumberActuallyBreaks:
+    """The limit, stated as a number rather than as "it tolerates holes" (#178).
+
+    Random face deletion -- the original damaged fixture -- scatters gaps that
+    are nearly all smaller than the grid spacing, so it exercises the regime
+    where the method is exact and never finds the edge. A contiguous wedge
+    removes *surround*, which is the quantity the winding number actually
+    integrates, so ``w`` falls in proportion to what is missing.
+    """
+
+    @staticmethod
+    def _accuracy(degrees: float):
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+        from make_test_meshes import make_bates, make_torn
+
+        clean = make_bates(sections=128)
+        mesh = make_torn(clean, degrees) if degrees else clean
+
+        points = torch.tensor(
+            np.random.default_rng(7).uniform(-0.07, 0.07, (4000, 3)), dtype=DTYPE
+        )
+        radius = torch.sqrt(points[:, 0] ** 2 + points[:, 1] ** 2)
+        truth = (
+            (radius > 0.01) & (radius < 0.05) & (points[:, 2].abs() < 0.06)
+        ).numpy()
+
+        winding, _ = winding_number_and_distance(
+            points,
+            torch.tensor(mesh.vertices, dtype=DTYPE),
+            torch.tensor(mesh.faces, dtype=torch.long),
+        )
+        inside = winding.numpy()[truth].mean()
+        return ((winding > INSIDE_THRESHOLD).numpy() == truth).mean(), inside
+
+    def test_a_modest_tear_barely_matters(self):
+        """A 30 degree wedge is 8% of the faces and costs almost nothing."""
+        accuracy, inside = self._accuracy(30.0)
+        assert accuracy > 0.99
+        assert inside > 0.85
+
+    def test_accuracy_falls_monotonically_as_surround_is_removed(self):
+        results = [self._accuracy(d) for d in (0.0, 60.0, 120.0, 180.0)]
+        accuracies = [a for a, _ in results]
+        windings = [w for _, w in results]
+        assert accuracies == sorted(accuracies, reverse=True), accuracies
+        assert windings == sorted(windings, reverse=True), windings
+
+    def test_half_the_surface_missing_puts_w_on_the_threshold(self):
+        """The theoretical prediction, checked.
+
+        ``w`` is the fraction of the full surround the boundary covers, so
+        removing half of it should land the interior near 0.5 -- exactly where
+        the inside/outside decision stops being meaningful. Measured 0.495.
+        """
+        accuracy, inside = self._accuracy(180.0)
+        assert inside == pytest.approx(0.5, abs=0.08)
+        # Still better than a coin toss, because the surviving half of the
+        # surface still carries information -- but no longer trustworthy.
+        assert 0.75 < accuracy < 0.9
