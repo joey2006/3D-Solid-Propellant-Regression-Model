@@ -6,6 +6,17 @@ build-backend = "setuptools.build_meta"
 name = "srm-burnback"
 version = "0.1.0"
 description = "3D solid rocket motor grain burnback simulation using the Level Set Method"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Joey Grinberg" }]
+keywords = ["rocketry", "solid-rocket-motor", "level-set", "burnback", "simulation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Programming Language :: Python :: 3",
+]
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0",
