@@ -24,13 +24,14 @@ process.
 The first spike failed like this:
 
 ```
-FileNotFoundError: ...\dist\QtSpike\_internal\PySide6\pluginsplatforminputcontexts\qtvirtualkeyboardplugin.dll
+FileNotFoundError: ...\dist\QtSpike\_internal\PySide6\plugins\
+    platforminputcontexts\qtvirtualkeyboardplugin.dll
 ```
 
 That is Windows' 260-character path limit, not a missing file. PyInstaller
 nests deeply (`dist/<name>/_internal/<package>/...`), so a project checked out
 somewhere long — a OneDrive folder, say — overflows it partway through
-collecting Qt. The same build from `C:	mp\` succeeded immediately.
+collecting Qt. The same build from `C:\tmp\` succeeded immediately.
 
 **Build from a short path**, or enable long paths system-wide
 (`HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 1`).
