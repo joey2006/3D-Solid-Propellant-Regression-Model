@@ -32,8 +32,8 @@ class PhiWorker(QObject):
     point-primitive pairs. Seconds on a GPU, minutes on a CPU.
     """
 
-    #: Emitted with ``(phi, coords, h, stats)`` on success.
-    finished = Signal(object, object, float, object)
+    #: Emitted with ``(phi, phi_outer, coords, h, stats)`` on success.
+    finished = Signal(object, object, object, float, object)
     failed = Signal(str)
     progress = Signal(str)
 
@@ -104,7 +104,7 @@ class PhiWorker(QObject):
                 "n_inhibited": labels["n_inhibited"],
                 "ends": labels["ends"],
             }
-            self.finished.emit(phi, coords, h, stats)
+            self.finished.emit(phi, phi_outer, coords, h, stats)
         except Exception as exc:
             self.failed.emit(f"Could not build φ: {exc}")
 

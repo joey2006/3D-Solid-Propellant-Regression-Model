@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 
 from . import theme
 from .widgets import Banner, HelpButton, MetricGrid, divider, hint
@@ -780,6 +781,7 @@ class FieldView(QWidget):
         layout.setSpacing(0)
 
         self._phi = None
+        self._phi_outer = None
         self._coords = None
         self._h = 0.0
         self._axis = 2
@@ -1071,9 +1073,12 @@ class FieldView(QWidget):
     def set_mesh_available(self, available: bool) -> None:
         self.build_button.setEnabled(available)
 
-    def set_field(self, phi, coords, h: float, stats: dict) -> None:
+    def set_field(self, phi, phi_outer, coords, h: float, stats: dict) -> None:
         """Take a freshly built field and show it."""
         self._phi = phi.detach().to("cpu").numpy()
+        self._phi_outer = (
+            None if phi_outer is None else phi_outer.detach().to("cpu").numpy()
+        )
         self._coords = [c.detach().to("cpu").numpy() for c in coords]
         self._h = h
 
@@ -1122,6 +1127,7 @@ class FieldView(QWidget):
 
     def clear(self) -> None:
         self._phi = None
+        self._phi_outer = None
         self._coords = None
         self.banner.hide()
         self.metrics.reset()
@@ -1240,13 +1246,49 @@ class FieldView(QWidget):
             values = magnitude[near_surface] if near_surface.any() else magnitude
             self._histogram(histogram, values, np)
 
-        # The zero contour is the burning surface itself -- the one line in
-        # this picture with physical meaning.
+        # Two boundaries, drawn differently on purpose, because they are not
+        # the same kind of thing.
+        #
+        # The zero contour of phi is the *burning surface* -- the line that
+        # moves. Solid accent, the most prominent thing in the picture.
+        handles, names = [], []
         if field.min() < 0.0 < field.max():
             self._axes.contour(
                 horizontal, vertical, self._to_display(field), levels=[0.0],
                 colors=[theme.ACCENT], linewidths=1.6,
             )
+            handles.append(Line2D([], [], color=theme.ACCENT, linewidth=1.6))
+            names.append("burning surface (φ = 0)")
+
+        # The casing wall is *static*. It is deliberately not part of phi --
+        # including it is what made phi turn around mid-web and cross zero a
+        # second time at the wall. But it still has to be visible, or the grain
+        # appears to have no outer edge at all. Dashed and muted: this line is
+        # a boundary the burn stops at, not one it advances along.
+        if self._phi_outer is not None:
+            casing = np.take(self._phi_outer, index, axis=axis)
+            if casing.min() < 0.0 < casing.max():
+                # Near-white: this sits on top of a mid-blue field in phi
+                # mode and a magenta one in gradient mode, and a muted grey
+                # disappears into both.
+                self._axes.contour(
+                    horizontal, vertical, casing, levels=[0.0],
+                    colors=["#f2f5f7"], linewidths=1.5,
+                    linestyles=[(0, (6, 3))],
+                )
+                handles.append(
+                    Line2D([], [], color="#f2f5f7", linewidth=1.5,
+                           linestyle=(0, (6, 3)))
+                )
+                names.append("casing wall (inhibited)")
+
+        if handles:
+            legend = self._axes.legend(
+                handles, names, loc="upper right", fontsize=8,
+                facecolor=theme.BG_RAISED, edgecolor=theme.BORDER, framealpha=0.9,
+            )
+            for text in legend.get_texts():
+                text.set_color(theme.TEXT_MUTED)
 
         self._axes.set_aspect("equal")
         names = "XYZ"

@@ -449,8 +449,8 @@ class MainWindow(QMainWindow):
 
         self._thread.start()
 
-    def _on_field_built(self, phi, coords, h, stats) -> None:
-        self.field_view.set_field(phi, coords, h, stats)
+    def _on_field_built(self, phi, phi_outer, coords, h, stats) -> None:
+        self.field_view.set_field(phi, phi_outer, coords, h, stats)
         self.field_view.build_button.setEnabled(True)
         self.tabs.setCurrentWidget(self.field_view)
         self.status_message.setText(
