@@ -814,18 +814,22 @@ class SimulationPanel(QWidget):
         self.reinit_every = QSpinBox()
         self.reinit_every.setRange(1, 100)
         self.reinit_every.setValue(5)
-        # The unit lives in the box rather than the label, so the row reads as
-        # a sentence -- "Tidy the field every [5 steps]" -- instead of leaving
-        # "every 5" to mean 5 of something the reader has to guess.
+        # The unit stays in the box rather than the label. The label names the
+        # operation; the value has to say "5 of what", and "every 5" on its own
+        # left that to be guessed.
         self.reinit_every.setSuffix("  steps")
-        box_layout.addWidget(FieldRow("Tidy the field every", self.reinit_every))
+        box_layout.addWidget(
+            FieldRow("Reinitialization frequency", self.reinit_every)
+        )
         box_layout.addWidget(
             box.add_help(
+                "How often the field is rebuilt, in simulation steps — 5 means "
+                "every fifth step.<br><br>"
                 "As the surface moves, the stored distances slowly stop being "
-                "true distances — they stretch where the surface curves and "
+                "true distances: they stretch where the surface curves and "
                 "where it burns at different speeds. Left alone that error "
-                "compounds and the front drifts out of position. Every few "
-                "steps the field is rebuilt so the numbers mean what they "
+                "compounds and the front drifts out of position. "
+                "Reinitialization repairs it, so the numbers mean what they "
                 "claim again. More often is more accurate and slower."
             )
         )
