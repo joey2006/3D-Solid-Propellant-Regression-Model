@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -963,6 +964,17 @@ class FieldView(QWidget):
         self._help_panel.setWidgetResizable(True)
         self._help_panel.setFrameShape(QScrollArea.NoFrame)
         self._help_panel.setMaximumHeight(230)
+        # A word-wrapped QLabel reports its *unwrapped* text width as its size
+        # hint, and a widgetResizable QScrollArea passes that hint on. Showing
+        # the help therefore asked the central widget to become as wide as the
+        # longest unbroken sentence, and QMainWindow granted it by taking the
+        # width from the docks -- which it never gave back when the help was
+        # hidden again. Ignoring the horizontal hint makes the panel take the
+        # width it is given and wrap into it, so toggling help cannot move the
+        # docks at all. The scrollbar is turned off for the same reason: with
+        # it on, the panel would rather scroll sideways than wrap.
+        self._help_panel.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._help_panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self._help_panel.setStyleSheet(
             f"QScrollArea {{ background:{theme.BG_RAISED};"
             f"border:1px solid {theme.BORDER}; border-radius:6px; }}"
@@ -973,44 +985,37 @@ class FieldView(QWidget):
         help_layout.setContentsMargins(14, 12, 14, 12)
         help_layout.setSpacing(4)
 
+        # A definition list, not an essay. Each tile above gets exactly one
+        # line saying what it measures and what a good value looks like --
+        # which is the question the panel actually has to answer. The longer
+        # explanations of the method that used to live here were reference
+        # material, not reading a user needs while looking at a number.
         for heading, text in (
             ("What φ is",
-             "A number stored at every point of a 3D grid around the grain: "
-             "how far that point is from the burning surface, signed by which "
-             "side it is on. Negative inside the propellant, positive in open "
-             "void, zero exactly on the surface. The burning surface is never "
-             "stored as an object — it is simply wherever φ equals zero."),
-            ("Why store it that way",
-             "Burning becomes arithmetic: subtract the burn rate from φ "
-             "everywhere and the zero crossing moves itself. It keeps working "
-             "when the front splits, merges or forms a sharp corner — all of "
-             "which happen in a real grain, and all of which break a model "
-             "that tracks the surface as a mesh of points."),
-            ("What the slice shows",
-             "One flat cut through that 3D field, since a volume cannot be "
-             "drawn directly. Choose the direction with the axis box and the "
-             "position with the slider. The two orange contours are the grain "
-             "outline: the inner one is the burning surface and recedes as the "
-             "motor fires, the outer is the casing wall and stays put."),
-            ("Why the colour continues past the wall",
-             "φ is defined over the whole grid, not just the grain, and keeps "
-             "decreasing outside the casing. That is deliberate — the solver "
-             "needs a smooth field everywhere, and cutting it off at the wall "
-             "would put a kink exactly where the burn front ends up at "
-             "burnout. The wall is enforced separately, as a clamp."),
-            ("The numbers",
-             "<i>Solid cells</i> is the share of the grid the sign field "
-             "called propellant — compare it against port fraction in "
-             "Measurements. <i>Burning faces</i> is how many mesh triangles φ "
-             "measures distance from; the outer wall is always excluded, and "
-             "the end faces follow the setting in the Geometry panel. "
-             "<i>Build time</i> is what this grid cost."),
-            ("|∇φ| — set aside for now",
-             "The three greyed tiles measure how close the field is to a true "
-             "distance function. The measurement is correct but reports an "
-             "abstraction rather than anything actionable, so it is parked "
-             "under issue #193 rather than left to be misread. It still runs, "
-             "and is still checked by the test suite."),
+             "The distance from every grid point to the burning surface, "
+             "signed by side: negative in propellant, positive in void, zero "
+             "on the surface itself."),
+            ("The band",
+             "The three |∇φ| numbers below are measured only in the shell of "
+             "cells near the surface — the region the solver actually "
+             "evaluates."),
+            ("Median",
+             "The typical |∇φ| in that band. Should read 1.000."),
+            ("Spread",
+             "How much |∇φ| varies across the band. Tighter is better; under "
+             "0.02 reads as good."),
+            ("Within 1%",
+             "The share of band cells reading between 0.99 and 1.01. Higher "
+             "is better."),
+            ("Solid cells",
+             "The share of the grid called propellant. Compare it against "
+             "port fraction in Measurements."),
+            ("Burning faces",
+             "How many mesh triangles φ measures distance from. The outer "
+             "wall is always excluded; the end faces follow the Geometry "
+             "panel."),
+            ("Build time",
+             "What this grid cost to compute."),
         ):
             title = QLabel(heading)
             title.setStyleSheet(

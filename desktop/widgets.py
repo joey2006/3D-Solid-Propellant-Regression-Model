@@ -180,6 +180,16 @@ def hint(text: str) -> QLabel:
     label.setStyleSheet(
         f"color:{theme.TEXT_FAINT}; font-size:11px; padding:0 0 4px 0;"
     )
+    # A word-wrapped QLabel still reports its *unwrapped* text width as its
+    # size hint, so revealing one inside a dock asked that dock to grow to the
+    # width of the whole sentence -- stealing space from the central view, and
+    # not returning it when the help was hidden again. Ignoring the horizontal
+    # hint makes the label wrap into whatever width it is given instead.
+    # `setHeightForWidth` has to be set with it, or the label is allotted a
+    # single line's height and the wrapped remainder is clipped.
+    policy = QSizePolicy(QSizePolicy.Ignored, QSizePolicy.Minimum)
+    policy.setHeightForWidth(True)
+    label.setSizePolicy(policy)
     return label
 
 
