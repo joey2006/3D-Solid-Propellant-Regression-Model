@@ -16,6 +16,7 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt, QThread, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QDockWidget,
     QFileDialog,
     QInputDialog,
@@ -44,6 +45,7 @@ from srm_burnback.geometry.import_mesh import (
 
 from . import theme
 from .panels import (
+    RUNAWAY_CAP,
     GeometryPanel,
     MeasurementsPanel,
     PropellantPanel,
@@ -67,7 +69,15 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP)
-        self.resize(1440, 900)
+        # Never open larger than the screen actually is. 1440x900 is a fine
+        # default on a large monitor and hangs off the right-hand edge on a
+        # laptop, where the part that disappears is the docked panels. The
+        # margin leaves room for the taskbar and window frame.
+        available = QApplication.primaryScreen().availableGeometry()
+        self.resize(
+            min(1440, available.width() - 80),
+            min(900, available.height() - 80),
+        )
 
         self._mesh = None
         self._stats = None
@@ -228,8 +238,15 @@ class MainWindow(QMainWindow):
         scroll.setWidget(widget)
         scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        # Wide enough that the labelled rows never need horizontal scrolling.
-        scroll.setMinimumWidth(300)
+        # A floor low enough that the dock can actually be dragged narrower.
+        # This was 300, which is where three separate complaints came from: four
+        # docks then demanded 600px between them before the central view asked
+        # for anything, so the window's minimum width could exceed the screen
+        # and hang off the right-hand edge; the splitters appeared dead because
+        # the docks were already at their minimum and had nowhere to go; and the
+        # space left over was too little for the field toolbar, which clipped.
+        # 180 still fits a labelled row, and the panels scroll if they need to.
+        scroll.setMinimumWidth(180)
 
         dock.setWidget(scroll)
         dock.setObjectName(f"dock_{title.lower()}")
@@ -818,9 +835,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "No burnout",
-                f"The run hit its {summary['time']:.1f} s limit with propellant "
-                "left.\n\nEither raise Max time, or check that the grain has a "
-                "bore for the burn to start from.",
+                f"The run gave up after {summary['time']:.0f} s of burn time "
+                "with propellant left.\n\nThat is long enough that the grain is "
+                "probably not burning at all rather than burning slowly. Check "
+                "that it has a bore for the burn to start from, and that the "
+                "End faces setting matches the grain you meant to draw.",
             )
 
     def _on_simulation_failed(self, message: str) -> None:
@@ -843,7 +862,7 @@ class MainWindow(QMainWindow):
             burn_coefficient=propellant.a,
             pressure_exponent=propellant.n,
             density=propellant.density,
-            max_time=float(self.simulation_panel.max_time.value()),
+            max_time=RUNAWAY_CAP,
             cfl=float(self.simulation_panel.cfl.value()),
             reinit_every=int(self.simulation_panel.reinit_every.value()),
             units=self.measurements_panel.units(),
@@ -871,7 +890,9 @@ class MainWindow(QMainWindow):
                 design.pressure_exponent,
                 design.density,
             )
-            self.simulation_panel.max_time.setValue(design.max_time)
+            # design.max_time is read and discarded: the run length is no
+            # longer a setting, so a saved one has nowhere to go. The field
+            # stays in the file format so older designs still open.
             self.simulation_panel.cfl.setValue(design.cfl)
             self.simulation_panel.reinit_every.setValue(design.reinit_every)
             self.measurements_panel.set_units(design.units)

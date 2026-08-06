@@ -53,6 +53,13 @@ RESOLUTIONS = [32, 48, 64, 96, 128, 192, 256]
 #: for why there is no useful direction to move it in.
 DOMAIN_MARGIN = 0.05
 
+#: Seconds of simulated time after which a run gives up, in case the grain
+#: never burns out. Not a setting: a motor that has not finished in 5 minutes
+#: of burn time has something wrong with it -- no bore, or a surface that was
+#: labelled inhibited when it should burn -- and the answer is to fix that, not
+#: to wait longer. The Stop button covers wanting a run to end early.
+RUNAWAY_CAP = 300.0
+
 
 class GeometryPanel(QWidget):
     """Grain source and the grid it will be discretised onto."""
@@ -636,49 +643,44 @@ class SimulationPanel(QWidget):
         box_layout = QVBoxLayout(box)
         box_layout.setSpacing(8)
 
-        self.max_time = QDoubleSpinBox()
-        self.max_time.setRange(0.01, 1000.0)
-        self.max_time.setDecimals(2)
-        self.max_time.setValue(10.0)
-        self.max_time.setSuffix("  s")
-        box_layout.addWidget(FieldRow("Max time", self.max_time))
-        box_layout.addWidget(
-            box.add_help(
-                "How long to simulate before stopping, if the grain has not "
-                "burnt out first."
-            )
-        )
-
+        # Each control's explanation is added directly beneath that control.
+        # One combined paragraph at the end of the box used to describe CFL, but
+        # sat under the row after it -- so the help for one control appeared to
+        # belong to another. Help text belongs to a control, not to a box.
         self.cfl = QDoubleSpinBox()
         self.cfl.setRange(0.05, 0.9)
         self.cfl.setDecimals(2)
         self.cfl.setSingleStep(0.05)
         self.cfl.setValue(0.4)
+        box_layout.addWidget(FieldRow("Timestep safety", self.cfl))
         box_layout.addWidget(
-            FieldRow(
-                "CFL number",
-                self.cfl,
-                "Timestep safety factor. The Godunov scheme is only stable "
-                "below 1.",
+            box.add_help(
+                "How big a step the simulation takes each time it advances, as "
+                "a fraction of the largest step that is still safe. The burn "
+                "front must never jump more than one grid cell in a step, or "
+                "the solver loses track of it and the run falls apart — 0.4 "
+                "means \"use 40% of the biggest legal step\". Lower is slower "
+                "but safer; the default is fine unless a run misbehaves. "
+                "(Its formal name is the CFL number.)"
             )
         )
 
         self.reinit_every = QSpinBox()
         self.reinit_every.setRange(1, 100)
         self.reinit_every.setValue(5)
-        box_layout.addWidget(
-            FieldRow(
-                "Reinit every",
-                self.reinit_every,
-                "Steps between reinitialisations, which repair |∇φ| "
-                "drift caused by curvature and non-uniform burn rate.",
-            )
-        )
+        # The unit lives in the box rather than the label, so the row reads as
+        # a sentence -- "Tidy the field every [5 steps]" -- instead of leaving
+        # "every 5" to mean 5 of something the reader has to guess.
+        self.reinit_every.setSuffix("  steps")
+        box_layout.addWidget(FieldRow("Tidy the field every", self.reinit_every))
         box_layout.addWidget(
             box.add_help(
-                "CFL is the timestep safety factor — smaller is slower but "
-                "more stable, and above 1 the solver blows up. Reinit "
-                "periodically cleans up numerical drift in the surface field."
+                "As the surface moves, the stored distances slowly stop being "
+                "true distances — they stretch where the surface curves and "
+                "where it burns at different speeds. Left alone that error "
+                "compounds and the front drifts out of position. Every few "
+                "steps the field is rebuilt so the numbers mean what they "
+                "claim again. More often is more accurate and slower."
             )
         )
 
@@ -731,9 +733,9 @@ class SimulationPanel(QWidget):
         self.summary.setText(text)
 
     def config_values(self) -> dict:
-        """The stopping criteria, as the runner's config expects them."""
+        """The solver settings, as the runner's config expects them."""
         return {
-            "max_time": float(self.max_time.value()),
+            "max_time": RUNAWAY_CAP,
             "cfl_factor": float(self.cfl.value()),
             "reinit_interval": int(self.reinit_every.value()),
         }

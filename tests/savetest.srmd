@@ -1,0 +1,20 @@
+{
+  "format": "srm-burnback-design",
+  "version": 1,
+  "geometry_path": "C:\\Users\\Joey\\OneDrive\\Documents\\Projects\\3D-Solid-Propellant-Regression-Model\\BATES.stp",
+  "geometry_relative": null,
+  "ends": "inhibited",
+  "resolution": 96,
+  "margin": 0.05,
+  "device": "cuda",
+  "propellant_name": "APCP (generic composite)",
+  "burn_coefficient": 0.005,
+  "pressure_exponent": 0.35,
+  "density": 1750.0,
+  "max_time": 10.0,
+  "cfl": 0.4,
+  "reinit_every": 5,
+  "units": "imperial",
+  "notes": "",
+  "metadata": {}
+}

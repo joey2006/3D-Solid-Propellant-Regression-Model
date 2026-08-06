@@ -928,7 +928,12 @@ class FieldView(QWidget):
         self.slice_slider = QSlider(Qt.Horizontal)
         self.slice_slider.setRange(0, 100)
         self.slice_slider.setValue(50)
-        self.slice_slider.setFixedWidth(200)
+        # Was a fixed 200px, which made this the widget that broke when the tab
+        # was narrow: a fixed width cannot yield, so the row overflowed and the
+        # slider was drawn straight through the controls beside it. A minimum
+        # plus room to expand lets it give way instead.
+        self.slice_slider.setMinimumWidth(90)
+        self.slice_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.slice_slider.setToolTip("Where along the axis to cut the slice.")
         self.slice_slider.valueChanged.connect(self._redraw)
         bar_layout.addWidget(self.slice_slider)

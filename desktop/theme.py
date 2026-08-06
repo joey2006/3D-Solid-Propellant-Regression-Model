@@ -232,12 +232,20 @@ QSlider::sub-page:horizontal {{
     background: {ACCENT};
     border-radius: 2px;
 }}
+/* The handle is drawn centred on the 4px groove, so it overhangs by half its
+   own height in each direction. At 14px that was 5px of overhang against a
+   -6px margin, with nothing guaranteeing the widget was tall enough to draw
+   it -- so the top of the circle was clipped off. A smaller handle and an
+   explicit minimum height leave room for the whole circle. */
+QSlider:horizontal {{
+    min-height: 18px;
+}}
 QSlider::handle:horizontal {{
     background: {TEXT};
-    width: 14px;
-    height: 14px;
-    margin: -6px 0;
-    border-radius: 7px;
+    width: 12px;
+    height: 12px;
+    margin: -5px 0;
+    border-radius: 6px;
 }}
 QSlider::handle:horizontal:hover {{
     background: #ffffff;
