@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QThread
+from PySide6.QtCore import QSettings, Qt, QThread, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QDockWidget,
@@ -31,6 +31,7 @@ from srm_burnback.geometry.measurements import grain_measurements
 from srm_burnback.geometry.MeshGrain import MeshGrain
 from srm_burnback.physics.vieille import VieilleBurnRate
 from srm_burnback.simulation.config import SimulationConfig
+from srm_burnback.units import format_value
 from srm_burnback.geometry.import_mesh import (
     CAD_SUFFIXES,
     MESH_SUFFIXES,
@@ -49,6 +50,7 @@ from .panels import (
     SimulationPanel,
 )
 from .views import FieldView, MeshDataView, MeshView
+from .widgets import HelpButton
 from .design import SUFFIX, Design, DesignError
 from .workers import MeshLoadWorker, PhiWorker, SimulationWorker
 
@@ -69,6 +71,10 @@ class MainWindow(QMainWindow):
 
         self._mesh = None
         self._stats = None
+        # The window's own copy of the app-wide unit system. The docks and views
+        # each keep one because they redraw independently; the Data view has no
+        # redraw of its own, so the window holds it on that view's behalf.
+        self._units = "imperial"
         self._path: Path | None = None
         self._thread: QThread | None = None
         self._worker: MeshLoadWorker | None = None
@@ -183,6 +189,7 @@ class MainWindow(QMainWindow):
         units = str(self._settings.value("units", "imperial"))
         if units not in ("metric", "imperial"):
             units = "metric" if units == "mm" else "imperial"
+        self._units = units
         self.measurements_panel.set_units(units, notify=False)
         self.mesh_view.set_units(units)
         self.field_view.set_units(units)
@@ -199,6 +206,13 @@ class MainWindow(QMainWindow):
         self.resizeDocks(
             list(self._docks.values()), [330] * len(self._docks), Qt.Horizontal
         )
+
+        # Every "?" in the window, wherever it lives -- the view toolbars, the
+        # per-row toggles on the Mesh Data tab, and the HelpGroup boxes in the
+        # docks. Found by search rather than listed, so a help button added
+        # later is covered without anyone remembering to wire it up.
+        for button in self.findChildren(HelpButton):
+            button.toggled.connect(lambda _checked: self._hold_dock_widths())
 
     def _add_dock(self, title: str, widget, area) -> None:
         dock = QDockWidget(title, self)
@@ -558,12 +572,16 @@ class MainWindow(QMainWindow):
             "ok" if stats["n_degenerate"] == 0 else "warn",
         )
 
-        ex = stats["extents"]
-        for key, value in zip(("x", "y", "z"), ex):
-            view.extents.set(key, _fmt(value))
+        # Converted and labelled like every other measurement in the app. These
+        # were previously printed as bare SI numbers, which is the worst of both
+        # worlds: they silently stayed in metres when the unit toggle moved, and
+        # carried no unit to say so, leaving "0.1016" to be read as inches.
+        # `format_value` renders `None` as "--" itself, so an unclosed mesh with
+        # no computable volume needs no special case here.
+        for key, value in zip(("x", "y", "z"), stats["extents"]):
+            view.extents.set(key, format_value(value, "length", self._units))
         view.extents.set(
-            "volume",
-            _fmt(stats["volume"]) if stats["volume"] is not None else "n/a",
+            "volume", format_value(stats["volume"], "volume", self._units)
         )
 
         messages = []
@@ -628,9 +646,17 @@ class MainWindow(QMainWindow):
     def _on_units_changed(self, units: str) -> None:
         """One unit choice drives the whole window, not just one panel."""
         self._settings.setValue("units", units)
+        self._units = units
         self.mesh_view.set_units(units)
         self.field_view.set_units(units)
         self.propellant_panel.set_units(units)
+        # The Data view is redrawn rather than told, because it has no state of
+        # its own to update -- it is written once when a mesh loads. Skipped
+        # when nothing is loaded, since there would be no stats to format.
+        if self._stats is not None:
+            self._populate_data_view()
+        # Grid spacing is a length too, so the tiles have to follow as well.
+        self._refresh_grid_metrics()
 
     def _refresh_measurements(self) -> None:
         """Recompute grain dimensions for the current mesh and density."""
@@ -668,8 +694,10 @@ class MainWindow(QMainWindow):
         _, h = grid_for_mesh(
             self._mesh, resolution, margin=self.geometry_panel.margin_value()
         )
-        view.grid.set("spacing", _fmt(h))
+        view.grid.set("spacing", format_value(h, "length", self._units))
 
+        # Cells across is a count, not a length, so it takes no unit and must
+        # not be converted -- same reasoning as |grad phi| on the field tab.
         across = self._stats["extents"][0] / h if h > 0 else 0
         view.grid.set(
             "across", f"{across:.0f}", "ok" if across >= 20 else "warn"
@@ -1009,6 +1037,31 @@ class MainWindow(QMainWindow):
         self.geometry_panel.open_button.setEnabled(not busy)
         if message:
             self.status_message.setText(message)
+
+    def _hold_dock_widths(self) -> None:
+        """Keep the docks the width they already are across a help toggle.
+
+        Revealing help grows the widget holding it, and QMainWindow pays for
+        that by narrowing the docks -- then does not widen them again when the
+        help is hidden, so the panels end up permanently clipped after a single
+        click of a ``?``.
+
+        The size policies on the help text are the real fix, and stop the
+        squeeze from being requested in the first place. This is the backstop:
+        it asserts the widths afterwards whatever caused them to move, so a
+        long banner message or a future help block cannot reintroduce the bug.
+
+        The restore is deferred by one event-loop turn on purpose. The relayout
+        the toggle triggers has not run yet, so resizing now would simply be
+        overwritten by it.
+        """
+        docks = list(self._docks.values())
+        if not docks:
+            return
+        widths = [dock.width() for dock in docks]
+        QTimer.singleShot(
+            0, lambda: self.resizeDocks(docks, widths, Qt.Horizontal)
+        )
 
     def _restore_layout(self) -> None:
         geometry = self._settings.value("window_geometry")
