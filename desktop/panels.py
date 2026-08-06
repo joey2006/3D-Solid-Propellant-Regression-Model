@@ -48,6 +48,11 @@ _PRETTY_DENSITY = {"kg/m3": "kg/m³", "g/cm3": "g/cm³", "lb/in3": "lb/in³"}
 
 RESOLUTIONS = [32, 48, 64, 96, 128, 192, 256]
 
+#: Empty space kept around the grain, as a fraction of its largest extent.
+#: Fixed rather than offered as a control -- see `GeometryPanel.margin_value`
+#: for why there is no useful direction to move it in.
+DOMAIN_MARGIN = 0.05
+
 
 class GeometryPanel(QWidget):
     """Grain source and the grid it will be discretised onto."""
@@ -153,29 +158,6 @@ class GeometryPanel(QWidget):
                 "grid is a 3D box of points: 64³ is 262k points, 128³ is 2.1M. "
                 "Higher resolves thin webs and slot corners, but cost grows "
                 "with the cube — doubling it is 8× the work."
-            )
-        )
-
-        self.margin = QDoubleSpinBox()
-        self.margin.setRange(0.0, 0.5)
-        self.margin.setSingleStep(0.01)
-        self.margin.setValue(0.05)
-        self.margin.setDecimals(2)
-        self.margin.valueChanged.connect(self.changed)
-        grid_layout.addWidget(
-            FieldRow(
-                "Domain margin",
-                self.margin,
-                "Padding beyond the mesh so the burn front never reaches the "
-                "domain edge, where the Neumann ghost cells live.",
-            )
-        )
-        grid_layout.addWidget(
-            grid_box.add_help(
-                "Empty space left around the grain, as a fraction of its size "
-                "(0.05 = 5% padding). The burn front must never touch the edge "
-                "of the box, where the maths stops being valid. Larger is "
-                "safer but wastes resolution on empty space."
             )
         )
 
@@ -302,7 +284,24 @@ class GeometryPanel(QWidget):
         return RESOLUTIONS[self.resolution.value()]
 
     def margin_value(self) -> float:
-        return float(self.margin.value())
+        """The domain padding, no longer a user setting.
+
+        This was a spinbox next to Resolution, which framed it as a peer
+        decision. It is not one. For an inhibited outer wall -- the only case
+        the solver accepts today (#194) -- the front travels *inward* from the
+        bore and the casing clamp pins the wall, so the padding is never
+        consumed and turning it down changes nothing. Turning it up is worse
+        than useless: resolution is fixed at N^3 either way, so padding buys
+        vacuum. DOMAIN_MARGIN of 0.05 already costs about 14% of the cells
+        (1.05^3), and the old 0.5 maximum would have spent over 70% of the
+        grid on empty space and quietly wrecked the resolution on the grain.
+
+        The engine keeps `margin` as a real parameter on `MeshGrain` and
+        `grid_for_mesh`, because burning ends (#194) make the front move
+        outward and the padding start to matter. What went away is presenting
+        it as a knob to turn.
+        """
+        return DOMAIN_MARGIN
 
     def device_string(self) -> str:
         return "cuda" if self.device.currentText().startswith("CUDA") else "cpu"
@@ -330,9 +329,14 @@ class GeometryPanel(QWidget):
         self.resolution_value.setText(f"{self.resolution_points()}\u00b3")
 
     def set_margin(self, margin: float) -> None:
-        self.margin.blockSignals(True)
-        self.margin.setValue(float(margin))
-        self.margin.blockSignals(False)
+        """Accept and ignore a saved margin.
+
+        Kept as a no-op rather than deleted so `.srmd` files written while the
+        spinbox existed still open. Discarding the stored value is the honest
+        thing to do -- reinstating a margin the UI can no longer show would
+        leave a design silently running on a setting with no way to see it,
+        let alone change it back.
+        """
 
     def set_device(self, device: str) -> None:
         """Select CUDA or CPU, falling back when the requested one is absent."""

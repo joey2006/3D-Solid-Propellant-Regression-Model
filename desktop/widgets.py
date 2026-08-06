@@ -239,7 +239,7 @@ class HelpGroup(QGroupBox):
     """A titled box whose explanatory text is hidden behind a ``?`` toggle.
 
     Every control in this app needs a sentence of explanation -- the domain is
-    unfamiliar enough that "Domain margin" or "CFL number" means nothing on
+    unfamiliar enough that "CFL number" or "End faces" means nothing on
     sight. Printing all of that permanently was honest but turned each panel
     into a wall of grey prose, and the prose crowded out the controls it was
     describing.
