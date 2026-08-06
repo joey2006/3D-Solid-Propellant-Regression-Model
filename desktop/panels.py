@@ -15,7 +15,9 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSlider,
     QSpinBox,
@@ -38,6 +40,7 @@ from srm_burnback.units import (
     units_for,
 )
 
+from . import user_propellants
 from .widgets import FieldRow, HelpGroup
 
 # Powers-of-two-ish resolutions. The winding number is O(cells x triangles), so
@@ -80,29 +83,13 @@ class GeometryPanel(QWidget):
         source_layout = QVBoxLayout(source_box)
         source_layout.setSpacing(8)
 
-        self.grain_type = QComboBox()
-        self.grain_type.addItems(
-            ["Imported mesh", "BATES", "Star", "Finocyl", "Polygon"]
-        )
-        # Only the imported path is wired up; the parametric grains are a later
-        # addition layered on top (see #135). Showing them greyed communicates
-        # the roadmap without pretending they work.
-        for i in range(1, self.grain_type.count()):
-            self.grain_type.model().item(i).setEnabled(False)
-        self.grain_type.setToolTip(
-            "The product input is an uploaded object. Parametric grains are a "
-            "later addition (#135)."
-        )
-        source_layout.addWidget(FieldRow("Grain type", self.grain_type))
-        source_layout.addWidget(
-            source_box.add_help(
-                "Where the shape comes from. Only imported meshes are wired "
-                "up today: you supply a mesh (STL/OBJ/PLY) or a CAD file "
-                "(STEP/STP) and it becomes the grain. "
-                "The parametric options are a later addition (#135)."
-            )
-        )
-
+        # There is no "Grain type" chooser. It listed four parametric grains
+        # that were all permanently greyed out, so its only working setting was
+        # the one already implied by everything else in the panel: the grain is
+        # an uploaded object. A control with one selectable option is not a
+        # choice, and this one cost a row explaining why you could not use it.
+        # When parametric grains actually arrive (#135) they need a chooser
+        # again -- built then, against how they really work.
         self.file_label = QLabel("No file loaded")
         self.file_label.setStyleSheet(
             f"color:{theme.TEXT_FAINT}; font-size:12px; padding:2px 0;"
@@ -123,7 +110,11 @@ class GeometryPanel(QWidget):
             )
         )
 
-        self.open_button = QPushButton("Open mesh...")
+        # "Open mesh..." read as "open whatever is selected above", so picking
+        # something from Recent and then pressing it was a surprise when a file
+        # dialog appeared instead. "Upload" names the action rather than the
+        # object, so it cannot be misread as acting on the Recent selection.
+        self.open_button = QPushButton("Upload mesh...")
         self.open_button.setProperty("accent", True)
         self.open_button.clicked.connect(self.open_requested)
         source_layout.addWidget(self.open_button)
@@ -255,16 +246,19 @@ class GeometryPanel(QWidget):
 
         self.recent_combo.blockSignals(True)
         self.recent_combo.clear()
-        if not paths:
-            self.recent_combo.addItem("(none yet)")
-            self.recent_combo.setEnabled(False)
-        else:
-            self.recent_combo.setEnabled(True)
-            for entry in paths:
-                self.recent_combo.addItem(Path(entry).name, entry)
-                self.recent_combo.setItemData(
-                    self.recent_combo.count() - 1, entry, Qt.ToolTipRole
-                )
+        # A placeholder always sits at the top and starts selected. Without it
+        # the box showed the most recent file as its current entry the moment
+        # the app opened, which claimed a grain was loaded when none was. It
+        # carries no path, and `_on_recent_picked` ignores entries without one,
+        # so choosing it does nothing rather than trying to load "nothing".
+        self.recent_combo.addItem("None selected", None)
+        for entry in paths:
+            self.recent_combo.addItem(Path(entry).name, entry)
+            self.recent_combo.setItemData(
+                self.recent_combo.count() - 1, entry, Qt.ToolTipRole
+            )
+        self.recent_combo.setCurrentIndex(0)
+        self.recent_combo.setEnabled(bool(paths))
         self.recent_combo.blockSignals(False)
 
     def select_recent(self, path: str) -> None:
@@ -395,8 +389,9 @@ class PropellantPanel(QWidget):
 
         # Named propellants (#152). Naming the choice makes it reviewable:
         # "KNSB" can be checked at a glance in a way that a = 0.00513 cannot.
+        self._user_propellants = user_propellants.load()
         self.propellant = QComboBox()
-        self.propellant.addItems([p.name for p in LIBRARY] + [CUSTOM])
+        self._rebuild_propellant_list()
         self.propellant.setToolTip(
             "Published reference values — a starting point, not a "
             "characterisation of your batch. Replace them with your own static "
@@ -416,6 +411,41 @@ class PropellantPanel(QWidget):
                 "how your batch actually burns. The error matters: chamber "
                 "pressure goes as a^(1/(1-n)), so 10% off in <i>a</i> is about "
                 "15% off in pressure at n = 0.35."
+            )
+        )
+
+        # Saving a measured propellant is the point of the warning above: once
+        # a static test says what a batch actually does, those numbers need
+        # somewhere to live other than three spin boxes that reset on the next
+        # selection.
+        propellant_buttons = QWidget()
+        propellant_button_layout = QHBoxLayout(propellant_buttons)
+        propellant_button_layout.setContentsMargins(0, 0, 0, 0)
+        propellant_button_layout.setSpacing(6)
+
+        self.save_propellant_button = QPushButton("Save propellant...")
+        self.save_propellant_button.clicked.connect(self._save_propellant)
+        propellant_button_layout.addWidget(self.save_propellant_button)
+
+        self.delete_propellant_button = QPushButton("Delete")
+        self.delete_propellant_button.setToolTip(
+            "Remove the selected propellant. Only your own saved propellants "
+            "can be deleted; the published reference values are fixed."
+        )
+        self.delete_propellant_button.clicked.connect(self._delete_propellant)
+        propellant_button_layout.addWidget(self.delete_propellant_button)
+        self._refresh_propellant_buttons()
+
+        vieille_layout.addWidget(propellant_buttons)
+        vieille_layout.addWidget(
+            vieille_box.add_help(
+                "<i>Save propellant</i> stores the three numbers below under a "
+                "name of your choosing, so your own static-test data is one "
+                "click away in every future design. Saved propellants are kept "
+                "with your settings, not in the design file, and re-saving an "
+                "existing name updates it. The published entries cannot be "
+                "overwritten or deleted — a name has to keep saying where its "
+                "numbers came from."
             )
         )
 
@@ -515,9 +545,123 @@ class PropellantPanel(QWidget):
 
     # -- Propellant library (#152) -----------------------------------------
 
+    # -- The saved-propellant store (#152) ---------------------------------
+
+    def _rebuild_propellant_list(self, select: str | None = None) -> None:
+        """Refill the combo: published first, then the user's, then Custom.
+
+        Published entries stay at the top because they are the ones a newcomer
+        needs and the ones that never change. The selection is restored by name
+        afterwards, so saving does not silently move the user somewhere else.
+        """
+        keep = select or self.propellant.currentText()
+        self.propellant.blockSignals(True)
+        self.propellant.clear()
+        self.propellant.addItems([p.name for p in LIBRARY])
+        if self._user_propellants:
+            self.propellant.insertSeparator(self.propellant.count())
+            self.propellant.addItems([p.name for p in self._user_propellants])
+        self.propellant.addItem(CUSTOM)
+        index = self.propellant.findText(keep)
+        self.propellant.setCurrentIndex(index if index >= 0 else 0)
+        self.propellant.blockSignals(False)
+        self._refresh_propellant_buttons()
+
+    def _refresh_propellant_buttons(self) -> None:
+        """Delete only applies to the user's own entries."""
+        # The combo is built before the buttons that sit under it, so the first
+        # rebuild happens while they do not exist yet. It is refreshed again as
+        # soon as they do.
+        if not hasattr(self, "delete_propellant_button"):
+            return
+        name = self.propellant.currentText()
+        own = any(p.name == name for p in self._user_propellants)
+        self.delete_propellant_button.setEnabled(own)
+
+    def _known_propellant(self, name: str):
+        """Look a name up in the published library *and* the user's store."""
+        for propellant in self._user_propellants:
+            if propellant.name == name:
+                return propellant
+        return by_name(name)
+
+    def _save_propellant(self) -> None:
+        name, ok = QInputDialog.getText(
+            self,
+            "Save propellant",
+            "Name this propellant — use something that identifies the batch, "
+            "not just the type:",
+            text="" if self.propellant.currentText() == CUSTOM
+                 else self.propellant.currentText(),
+        )
+        name = name.strip()
+        if not ok or not name:
+            return
+        if name == CUSTOM:
+            QMessageBox.warning(
+                self,
+                "Reserved name",
+                f"{CUSTOM!r} is what the app calls coefficients that match no "
+                "saved propellant, so it cannot also be one. Pick another name.",
+            )
+            return
+        if user_propellants.is_builtin(name):
+            QMessageBox.warning(
+                self,
+                "That name is taken",
+                f"{name!r} is a published reference propellant and cannot be "
+                "overwritten. Its numbers are citable, and they would stop "
+                "being so if your batch could be saved under the same name.\n\n"
+                "Add something that identifies your batch instead.",
+            )
+            return
+
+        existing = any(p.name == name for p in self._user_propellants)
+        if existing:
+            reply = QMessageBox.question(
+                self,
+                "Replace it?",
+                f"You already have a propellant called {name!r}. Replace its "
+                "numbers with the ones on screen?",
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        current = self.propellant_value()
+        self._user_propellants = user_propellants.save(
+            Propellant(
+                name=name,
+                a=current.a,
+                n=current.n,
+                density=current.density,
+                source="Saved from this app.",
+            )
+        )
+        self._rebuild_propellant_list(select=name)
+        self.changed.emit()
+
+    def _delete_propellant(self) -> None:
+        name = self.propellant.currentText()
+        if not any(p.name == name for p in self._user_propellants):
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete propellant",
+            f"Delete {name!r}? The coefficients stay on screen, so nothing "
+            "about the current design changes — only the saved entry goes.",
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._user_propellants = user_propellants.delete(name)
+        # Land on Custom rather than whatever happens to be first: the numbers
+        # on screen are still the deleted propellant's, and they now match no
+        # saved entry, which is exactly what Custom means.
+        self._rebuild_propellant_list(select=CUSTOM)
+
     def _on_propellant_picked(self, index: int) -> None:
         """Load a named propellant's numbers into the three inputs."""
-        chosen = by_name(self.propellant.itemText(index))
+        chosen = self._known_propellant(self.propellant.itemText(index))
+        self._refresh_propellant_buttons()
         if chosen is None:      # "Custom" -- leave the values alone
             return
         for widget, value in (
@@ -539,11 +683,12 @@ class PropellantPanel(QWidget):
         it would be false.
         """
         current = self.propellant.currentText()
-        chosen = by_name(current)
+        chosen = self._known_propellant(current)
         if chosen is None:
             return
         if not matches(chosen, self.a.value(), self.n.value(), self._density_si):
             self.propellant.setCurrentText(CUSTOM)
+            self._refresh_propellant_buttons()
 
     def set_propellant(
         self, name: str, a: float, n: float, density: float
@@ -561,11 +706,12 @@ class PropellantPanel(QWidget):
         self._density_si = float(density)
         self._apply_density_units()
 
-        known = by_name(name)
+        known = self._known_propellant(name)
         fits = known is not None and matches(known, float(a), float(n), float(density))
         self.propellant.blockSignals(True)
         self.propellant.setCurrentText(name if fits else CUSTOM)
         self.propellant.blockSignals(False)
+        self._refresh_propellant_buttons()
 
     def propellant_value(self) -> Propellant:
         """The current coefficients, named if they match a library entry."""
