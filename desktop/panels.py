@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import torch
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -774,13 +775,29 @@ class MeasurementsPanel(QWidget):
         unit_layout.addStretch(1)
 
         self._unit_buttons = {}
-        for code, text in (("metric", "Metric"), ("imperial", "Imperial")):
+        labels = (("metric", "Metric"), ("imperial", "Imperial"))
+        for code, text in labels:
             button = QPushButton(text)
             button.setCheckable(True)
-            button.setFixedWidth(72)
             button.clicked.connect(lambda _=False, c=code: self.set_units(c))
             unit_layout.addWidget(button)
             self._unit_buttons[code] = button
+
+        # Size the pair to their own text rather than a fixed width. A
+        # QPushButton centres its label and clips it at *both* ends when it
+        # overflows -- it does not elide -- so a button one character too narrow
+        # renders "Imperial" as "mperia", which reads as a typo rather than a
+        # layout bug. Measure at the heavier weight because the :checked rule in
+        # `theme` bumps the font to 600, so the selected button is the wider one
+        # and sizing to the unchecked text would clip the moment it is picked.
+        heavy = QFont(self.font())
+        heavy.setWeight(QFont.Weight.DemiBold)
+        metrics = QFontMetrics(heavy)
+        # 14px stylesheet padding + 1px border a side, plus slack for the focus
+        # ring, and both buttons share the widest so the toggle stays symmetric.
+        width = max(metrics.horizontalAdvance(t) for _, t in labels) + 34
+        for button in self._unit_buttons.values():
+            button.setFixedWidth(width)
         # Imperial by default: experimental motor work is dimensioned in
         # inches, and it is the units most parts arrive in.
         self._unit_buttons["imperial"].setChecked(True)
